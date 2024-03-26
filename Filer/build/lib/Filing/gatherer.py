@@ -2,7 +2,7 @@ import os
 import shutil
 import csv
 from datetime import datetime
-from Filer.Filing.filestatser import FileStatsCollector
+from Filing.filestatser import FileStatsCollector
 import re
 
 class MediaGatherer(FileStatsCollector):

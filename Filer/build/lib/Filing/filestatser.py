@@ -51,7 +51,7 @@ class FileStatsCollector:
         self.media_extensions = media_extensions
         self.all_files = all_files
         self.skip_folders = skip_folders
-        self.file_stats = self.gather_file_stats()
+        self.file_stats = self._gather_file_stats()
         self.file_types = [stat["File Type"] for stat in self.file_stats]
 
     def get_styles(self):
@@ -117,6 +117,12 @@ h2 {{
 /* Styles for file statistics report */
 .file-stats-table {{
     margin-bottom: 30px;
+}}
+
+.datetime {{
+    text-align: center;
+    font-weight: bold;
+    font-size: 18px;
 }}
 
 """
@@ -231,7 +237,7 @@ h2 {{
             print(f"Error gathering file stats in folder '{foldername}': {e}")
         return folder_stats
 
-    def gather_file_stats(self):
+    def _gather_file_stats(self):
         """
         Scan the root folder for media files, collect file statistics, and return the obtained statistics.
 
@@ -299,6 +305,7 @@ h2 {{
         </head>
         <body>
             <h1>File Statistics Report</h1>
+            <p class="datetime">Generated on: { datetime.now().strftime("%d-%b-%Y %H:%M:%S") }</p>
             <table>
                 <tr>
                     <th>File Name</th>
@@ -514,6 +521,7 @@ h2 {{
         <body>
             <div class="container">
                 <h1>Summary Statistics {" (Media Files)" if not self.all_files else ""}</h1>
+                <p class="datetime">Generated on: { datetime.now().strftime("%d-%b-%Y %H:%M:%S") }</p>
                 <p class="root_foldername">Stats For Folder: {self.root_folder}</p>
                 <table>
                     <tr><th>Total Files</th><td>{total_files}</td></tr>
