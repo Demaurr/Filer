@@ -38,15 +38,21 @@ class MediaGatherer(FileStatsCollector):
         media_gatherer.generate_stats_csv()
     """
 
-    def __init__(self, root_folder, destination_folder="media", skip_folders=[], media_extensions=['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif'], all_files=False):
+    def __init__(self, root_folder, destination_folder=None, skip_folders=None, media_extensions=['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif'], all_files=False):
+        if skip_folders is None:
+            skip_folders = []
+        if destination_folder is None:
+            destination_folder = os.path.join(root_folder, 'media')
         skip_folders.append(destination_folder)
-        super().__init__(root_folder, media_extensions=media_extensions, skip_folders=skip_folders, all_files=all_files)
+        print(skip_folders)
         self.root_folder = root_folder
         self.media_extensions = media_extensions
+        super().__init__(root_folder, media_extensions=media_extensions, skip_folders=skip_folders, all_files=all_files)
         self.moved_files = {}
         self.file_sources = []
         self.file_stats_dict = []
         self.dest_folder = destination_folder
+        
 
     def create_media_folder(self, destination_folder):
         """
@@ -77,6 +83,9 @@ class MediaGatherer(FileStatsCollector):
             for file_stat in files_to_move:
                 source_path = os.path.join(file_stat['Source Folder'], file_stat['File Name'])
                 destination_path = os.path.join(destination_folder, file_stat['File Name'])
+
+                if source_path == destination_path:
+                    continue
 
                 # print("The Suffix remover: ",self.remove_number_suffix(os.path.splitext(destination_path)[0]))
 
@@ -143,8 +152,8 @@ class MediaGatherer(FileStatsCollector):
         """
         try:
             if destination_folder is None:
-                destination_folder = os.path.join(self.root_folder, 'media')
-            # self.dest_folder = destination_folder
+                # destination_folder = os.path.join(self.root_folder, folder_name)
+                destination_folder = self.dest_folder
 
             if self.all_files:
                 move_all = True
@@ -205,3 +214,65 @@ class MediaGatherer(FileStatsCollector):
             print(f"\nStats CSV For Moved file generated: {csv_file_path}")
         except Exception as e:
             print(f"Error generating stats CSV: {e}")
+
+class Gatherer(MediaGatherer):
+    """
+    A class for gathering files of any specified extensions from a specified root folder.
+
+    Attributes:
+        extensions (list): List of custom file extensions to gather.
+        destination_folder (str): Folder where the files should be stored after being gathered
+             Default: 'Extracted Files' folder under root
+
+    Methods:
+        set_extensions(extensions): To Set custom file extensions to gather.
+        gather_files(destination_folder=None, move_all=False): Perform the media gathering process with custom extensions.
+
+    Example Usage:
+        root_directory = input("Enter the root directory: ")
+        destination_folder = input("Enter the destination folder (optional): ")
+        extensions = input("Enter custom file extensions (comma-separated): ").split(',')
+
+        custom_gatherer = CustomMediaGatherer(root_directory, destination_folder=destination_folder, extensions=extensions)
+        custom_gatherer.gather_files()
+    """
+
+    def __init__(self, root_folder, destination_folder=None, extensions=None, skip_folders=None, all_files=False):
+        if extensions is None:
+            extensions = []
+        if skip_folders is None:
+            skip_folders = []
+        if destination_folder is None:
+            destination_folder = os.path.join(root_folder,"Extracted Files")
+        self.destination_folder =  destination_folder
+
+        self.extensions = self.set_extensions(extensions)
+        # self.skip_folders = skip_folders.append(destination_folder)
+        # self.destination_folder = destination_folder
+        super().__init__(root_folder, destination_folder=self.destination_folder, media_extensions=self.extensions, skip_folders=skip_folders, all_files=all_files)
+        self.extensions = []
+
+    def set_extensions(self, extensions):
+        """
+        Set custom file extensions to gather.
+
+        Parameters:
+            extensions (list): List of custom file extensions.
+        """
+        while any(element == "" for element in extensions):
+            extensions = input("Enter custom file extensions (comma-separated): ").split(',')
+        return extensions
+
+
+    def gather_files(self, destination_folder=None, all_files=False):
+        """
+        Perform the media gathering process with custom extensions.
+
+        Parameters:
+            destination_folder (str): The destination folder path (default is 'Extracted Files' subfolder).
+            move_all (bool): Flag indicating whether to move all files or only particular extension files.
+        """
+        try:
+            super().gather_media(destination_folder, all_files)
+        except Exception as e:
+            print(f"Error gathering media with custom extensions: {e}")
