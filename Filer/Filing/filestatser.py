@@ -281,7 +281,8 @@ h2 {{
                 'Modification Date': datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
                 'Source Folder': foldername
             })
-            print(file_stats)
+            # print(file_stats)
+            return file_stats
         except Exception as e:
             print(f"An Exception Occurred in get_file_stats: {e}")
     
