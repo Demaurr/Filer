@@ -33,7 +33,7 @@ You can install Filer using the method stated in [documentation](Filer/documenta
 Here's a simple example demonstrating how to use Filer:
 
 ```python
-from Filer.Filing import gatherer as gf
+from Filing import gatherer as gf
 
 # Initialize MediaGatherer with the root directory
 root_directory = input("Enter the root directory: ")
