@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='Filer',
-    version='1.1.1',
+    version='1.1.2',
     packages=["Filing"],
     author='Demaurr',
     author_email='',
