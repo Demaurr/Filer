@@ -257,6 +257,35 @@ h2 {{
         return file_stats
     
     @staticmethod
+    def get_file_stats(file_path):
+        """
+        Collects and returns statistics for a given file path.
+        
+        Args:
+            file_path (str): The path to the file for which statistics are to be collected.
+            
+        Returns:
+            list: A list containing a dictionary with the file's statistics.
+        """
+        file_stats = []
+        try:
+            filename = os.path.basename(file_path)
+            foldername = os.path.dirname(file_path)
+            file_stat = os.stat(file_path)
+            file_stats.append({
+                'File Name': filename,
+                'File Type': os.path.splitext(filename)[1].lower(),
+                'File Size (Bytes)': file_stat.st_size,
+                'File Size (Human Readable)': FileStatsCollector.format_size(file_stat.st_size),
+                'Creation Date': datetime.fromtimestamp(file_stat.st_ctime).strftime('%Y-%m-%d %H:%M:%S'),
+                'Modification Date': datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                'Source Folder': foldername
+            })
+            print(file_stats)
+        except Exception as e:
+            print(f"An Exception Occurred in get_file_stats: {e}")
+    
+    @staticmethod
     def sort_by_key(file_stats, key, reverse=False):
         """
         Sorts the list of dictionaries by the specified key.
