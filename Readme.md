@@ -26,7 +26,7 @@ The `MediaGatherer` class extends the functionality of `FileStatsCollector` by p
 
 ## Installation
 
-You can install Filer using the method stated in [documentation](Filer\documentation.md) of the project.
+You can install Filer using the method stated in [documentation](Filer/documentation.md) of the project.
 
 ## Usage
 
