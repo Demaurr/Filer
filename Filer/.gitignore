@@ -3,3 +3,6 @@ __pycache__/
 
 test_main.py
 testing.py
+Filer.egg-info/*
+dist/*
+build/*
