@@ -55,15 +55,15 @@ class FileStatsCollector:
     """
 
 
-    def __init__(self, root_folder, media_extensions: list = None, all_files=False, skip_folders: list =None):
+    def __init__(self, root_folder, media_extensions: list = None, all_files=False, skip_folders: list=None):
         # self.media_extensions = media_extensions
         if media_extensions is None:
             self.media_extensions = ['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif']
         if skip_folders is None:
-            self.skip_folders = []
+            skip_folders = []
         self.root_folder = self.check_root_folder(root_folder)
         self.all_files = all_files
-        # self.skip_folders = skip_folders
+        self.skip_folders = skip_folders
         self.file_stats = self._gather_file_stats()
         self.file_types = [stat["File Type"] for stat in self.file_stats]
         self.total_files = len(self.file_stats)

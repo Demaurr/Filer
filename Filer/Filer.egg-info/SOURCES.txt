@@ -1,7 +1,0 @@
-setup.py
-Filer.egg-info/PKG-INFO
-Filer.egg-info/SOURCES.txt
-Filer.egg-info/dependency_links.txt
-Filer.egg-info/top_level.txt
-Filing/filestatser.py
-Filing/gatherer.py
