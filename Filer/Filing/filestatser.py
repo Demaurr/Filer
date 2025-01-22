@@ -19,13 +19,17 @@ class FileStatsCollector:
         media_extensions (list): List of allowed media file extensions.
         all_files (bool): Flag indicating whether to gather statistics for all files or only media files.
         skip_folders (list): List of folders to skip while gathering statistics.
+        total_files (int): Total number of files found in the root folder.
 
     Methods:
         is_media_file(filename): Check if a given filename has a valid media file extension.
         check_root_folder(folder): Check if the specified root folder exists; raise an error if it doesn't.
         format_size(size): Format file size in a human-readable format.
-        gather_file_stats(): Scan the root folder for media files, collect file statistics, and return the obtained statistics.
+        _gather_file_stats(): Scan the root folder for media files, collect file statistics, and return the obtained statistics.
+        _compare_file_stats(existing_files, only_diff): Compare the current file stats with existing file stats(csv).
         generate_file_stats_csv(): Generate a CSV file containing detailed statistics of media files.
+        get_file_stats(file_path): Collects and returns statistics for a given file path.
+        generate_difference_file_csv(): Generate a difference CSV file comparing current file stats with an existing CSV.
         show_file_size_distribution(): Display the distribution of file sizes.
         print_summary_stats(): Print a summary of file statistics, including total files, total average size, most occurring file type, and total size.
         get_file_typedist(): Get the distribution of file types.
@@ -35,7 +39,8 @@ class FileStatsCollector:
         show_folder_size_distribution(): Print the distribution of folder sizes.
         generate_file_stats_html(): Generates a Html file with all the stats like [Fila Name, Source Folder, File Sizes...].
         generate_summary_html(): Generates a Html file with Summary Statistics like File Type counts, Folder Counts etc.
-        sort_by_key(): Returns a Sorted List of Dicts with Respected to a Given Key. 
+        sort_by_key(file_stats, key, case_sense=True, reverse=False): Sorts the list of dictionaries by the specified key.
+        get_existing_csvdata(csv_path): Returns a Dict of Existing CSV Data.
 
     Example Usage:
         path = input("Enter a Root Path To Gather Info: ")
@@ -45,14 +50,23 @@ class FileStatsCollector:
         file_stats_collector.generate_file_stats_csv()
         file_stats_collector.show_file_size_distribution()
         file_stats_collector.print_summary_stats()
+        file_stats_collector.print_file_types()
+        file_stats_collector.show_folder_size_distribution()
     """
-    def __init__(self, root_folder, media_extensions=['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif'], all_files=False, skip_folders=[]):
+
+
+    def __init__(self, root_folder, media_extensions: list = None, all_files=False, skip_folders: list =None):
+        # self.media_extensions = media_extensions
+        if media_extensions is None:
+            self.media_extensions = ['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif']
+        if skip_folders is None:
+            self.skip_folders = []
         self.root_folder = self.check_root_folder(root_folder)
-        self.media_extensions = media_extensions
         self.all_files = all_files
-        self.skip_folders = skip_folders
+        # self.skip_folders = skip_folders
         self.file_stats = self._gather_file_stats()
         self.file_types = [stat["File Type"] for stat in self.file_stats]
+        self.total_files = len(self.file_stats)
 
     def get_styles(self):
         styles = f"""
@@ -249,7 +263,10 @@ h2 {{
 
         try:
             with Pool() as pool:
-                folder_stats_lists = pool.starmap(self.process_files, [(foldername, all_files, self.is_media_file, self.format_size) for foldername, _, _ in os.walk(self.root_folder) if all(skip_folder not in foldername for skip_folder in self.skip_folders)])
+                folder_stats_lists = pool.starmap(self.process_files, 
+                                                  [(foldername, all_files, self.is_media_file, self.format_size) 
+                                                   for foldername, _, _ in os.walk(self.root_folder) 
+                                                   if all(skip_folder not in foldername for skip_folder in self.skip_folders)])
                 file_stats = [file_stat for folder_stats in folder_stats_lists for file_stat in folder_stats]
         except Exception as e:
             print(f"Unexpected error occurred: {e}")
@@ -287,20 +304,26 @@ h2 {{
             print(f"An Exception Occurred in get_file_stats: {e}")
     
     @staticmethod
-    def sort_by_key(file_stats, key, reverse=False):
+    def sort_by_key(file_stats, key, case_sense=True, reverse=False):
         """
         Sorts the list of dictionaries by the specified key.
 
         Parameters:
             file_stats (list): The list of dictionaries to be sorted.
             key (str): The key by which to sort the dictionaries.
+            case_sense (bool): To Sort My Case Sensitivity
             reverse (bool, optional): Whether to sort in reverse order. Defaults to False.
 
         Returns:
             list: The sorted list of dictionaries.
         """
         try:
-            return sorted(file_stats, key=lambda x: x[key], reverse=reverse)
+            return sorted(
+                file_stats, 
+                key=lambda x: (
+                x[key] if case_sense or not isinstance(x[key], str) else str(x[key]).lower()
+            ), 
+                reverse=reverse)
         except KeyError:
             print(f"Key '{key}' not found in file_stats dictionaries.")
             return file_stats
@@ -313,7 +336,8 @@ h2 {{
         Generate a pretty HTML report of file statistics.
         """
         if not self.file_stats:
-            return
+            print("NO Data FOUND: Nothing To Create Html of")
+            return -1
 
         if len(self.file_stats) > 1500:
             user_input = input("Warning: Generating HTML report for a large number of files can consume a significant amount of memory. Do you want to continue? (yes/no): ").strip().lower()
@@ -377,9 +401,16 @@ h2 {{
         except Exception as e:
             print(f"Error generating HTML report: {e}")
 
-    def generate_file_stats_csv(self, csv_path=None):
+    def generate_file_stats_csv(
+            self, 
+            csv_path=None,
+            sort_by="File Name"
+        ):
         """
         Generate a CSV file containing detailed statistics of media files or all files.
+        Parameters:
+            csv_path (str): Optonal Path to save the stats csv in. Default will be the root folder with current datetime
+            sort_by (str): Key to sort the values of the dict by default is "File Name"
         """
         if not self.file_stats:
             print("NO Data FOUND: Nothing To Create Csv of")
@@ -402,8 +433,8 @@ h2 {{
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
                 writer.writeheader()
-
-                for stat in self.file_stats:
+                file_stats = self.sort_by_key(self.file_stats, sort_by)
+                for stat in file_stats:
                     writer.writerow({
                         'File Name': stat['File Name'],
                         'File Type': stat['File Type'],
@@ -418,28 +449,118 @@ h2 {{
         except Exception as e:
             print(f"Error generating file stats CSV: {e}")
 
+    def generate_difference_file_csv(self, csv_path, output_path=None, only_diff=False, sort_by="File Name"):
+        """
+        Generate a difference CSV file comparing current file stats with an existing CSV,
+        and optionally only include different files.
+
+        Parameters:
+        - csv_path (str): Path to the existing CSV file.
+        - output_path (str): Path to Store the Difference in File Data. If None the difference is Stored in existing csv.
+        - only_diff (bool): If True, only include files that are 'Modified', 'New', or 'Deleted'.
+        """
+        if not self.file_stats:
+            print("NO Data FOUND: Nothing To Create Csv of")
+            return -1
+
+        if not os.path.exists(csv_path):
+            print(f"N0 Previous record FOUND at {csv_path}. Generating a new CSV file.")
+            self.generate_file_stats_csv(csv_path)
+            return
+
+        try:
+            existing_files = self.get_existing_csvdata(csv_path)
+
+            difference_data = self.sort_by_key(self._compare_file_stats(existing_files, only_diff=only_diff), sort_by)
+
+            root_folder_basename = os.path.basename(self.root_folder)
+            current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+            difference_csv_name = f'{root_folder_basename}_difference_{current_time}.csv'
+            difference_csv_path = os.path.join(self.root_folder, difference_csv_name) if output_path is None else csv_path
+
+            with open(difference_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['File Name', 'File Type', 'File Size (Bytes)', 'File Size (Human Readable)',
+                            'Creation Date', 'Modification Date', 'Source Folder', 'Tag']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for data in difference_data:
+                    writer.writerow(data)
+
+            print(f"\nDifference CSV file generated: {difference_csv_path}")
+
+        except Exception as e:
+            print(f"Error generating difference CSV: {e}")
+
+    def _compare_file_stats(self, existing_files, only_diff=False):
+        """
+        Compare the current file stats with existing file stats.
+
+        Parameters:
+        - existing_files (dict): A dictionary of files from the existing CSV with full paths as keys.
+        - only_diff (bool): If True, return only the files that are 'Modified', 'New', or 'Deleted'.
+
+        Returns:
+        - list: A list of dictionaries containing file stats and a 'Tag' indicating the status.
+        """
+        current_files = {
+            os.path.join(stat['Source Folder'], stat['File Name']): stat
+            for stat in self.file_stats
+        }
+
+        difference_data = []
+        all_files = set(existing_files.keys()).union(current_files.keys())
+
+        for full_path in all_files:
+            if full_path in existing_files and full_path in current_files:
+                if (existing_files[full_path]['File Size (Bytes)'] == str(current_files[full_path]['File Size (Bytes)']) and
+                        existing_files[full_path]['Modification Date'] == current_files[full_path]['Modification Date']):
+                    tag = 'Same'
+                else:
+                    tag = 'Modified'
+                data = {**current_files[full_path], 'Tag': tag}
+            elif full_path in existing_files:
+                data = {**existing_files[full_path], 'Tag': 'Deleted'}
+            else:
+                data = {**current_files[full_path], 'Tag': 'New'}
+
+            # Add to results based on only_diff flag
+            if not only_diff or data['Tag'] != 'Same':
+                difference_data.append(data)
+
+        return difference_data
+    
+    def get_existing_csvdata(self, csv_path):
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"File {csv_path} doesn't exists")
+        else:
+            existing_files = {}
+            with open(csv_path, 'r', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    full_path = os.path.join(row['Source Folder'], row['File Name'])
+                    existing_files[full_path] = row
+            return existing_files
+
+
     def show_file_size_distribution(self):
         """
         Display the distribution of file sizes.
         """
-        # Define file size ranges
         size_ranges = {
             '0-1KB': (0, 1024),
             '1KB-100KB': (1024, 1024 * 100),
             '100KB-1MB': (1024 * 100, 1024 * 1024),
             '1MB-10MB': (1024 * 1024, 1024 * 1024 * 10),
             '10MB-100MB': (1024 * 1024 * 10, 1024 * 1024 * 100),
-            '100MB+': (1024 * 1024 * 100, 1024 * 1024 * 500),  # 100MB to 500MB
-            '500MB+': (1024 * 1024 * 500, float('inf'))  # 500MB+
+            '100MB+': (1024 * 1024 * 100, 1024 * 1024 * 500),
+            '500MB+': (1024 * 1024 * 500, float('inf')) 
         }
 
-        # Initialize dictionary to store file count in each range
         size_distribution = {size_range: 0 for size_range in size_ranges}
 
         for stat in self.file_stats:
             file_size = stat['File Size (Bytes)']
 
-            # Determine the size range for the current file size
             for size_range, (min_size, max_size) in size_ranges.items():
                 if min_size <= file_size < max_size:
                     size_distribution[size_range] += 1
@@ -456,13 +577,12 @@ h2 {{
         Returns:
             dict: A dictionary containing the folder paths as keys and their corresponding total size as values in Bytes.
         """
-        folder_sizes = {}  # Dictionary to store folder sizes
+        folder_sizes = {} 
 
         for stat in self.file_stats:
             folder_path = stat['Source Folder']
             file_size = stat['File Size (Bytes)']
 
-            # Update total size for the folder
             folder_sizes[folder_path] = folder_sizes.get(folder_path, 0) + file_size
 
         return folder_sizes
@@ -524,7 +644,6 @@ h2 {{
             file_type_table += f"<tr><td>{file_type}</td><td>{counts}</td></tr>\n\t"
         file_type_table += "</table>"
 
-        # HTML Code For Folder Table
         folder_file_counts_table = "<table><tr><th>Folder</th><th>File Count</th><th>Size</th></tr>"
         for folder, files in folder_file_counts:
             if len(folder) > 20:
@@ -535,7 +654,6 @@ h2 {{
             folder_file_counts_table += f"<tr><td>{abbreviated_folder}</td><td>{files}</td><td>{self.format_size(folder_size[folder])}</td></tr>\n\t"
         folder_file_counts_table += "</table>"
 
-        # Complete Html code
         html_content = f"""
         <!DOCTYPE html>
         <html lang="en">
@@ -571,7 +689,6 @@ h2 {{
         </html>
         """
 
-        # Writing HTML content to a file
         html_file_name = f'{os.path.basename(self.root_folder)}_summary_stats_report.html'
         html_file_path = os.path.join(self.root_folder, html_file_name) if html_path is None else html_path
         try:
@@ -596,7 +713,6 @@ h2 {{
             file_types = [stat['File Type'] for stat in self.file_stats]
             most_occurring_file_type = max(set(file_types), key=file_types.count)
 
-            # Count the unique folders
             self.unique_folders = set(stat['Source Folder'] for stat in self.file_stats)
             total_folders = len(self.unique_folders)
             return total_files, total_folders, total_size, avg_size, most_occurring_file_type
@@ -624,3 +740,11 @@ Most Occurring File Type: {most_occurred}
             print(summary_stats)
         except Exception as e:
             print(f"Error printing summary stats: {e}")
+
+# if __name__ == "__main__":
+#     filer = FileStatsCollector(r"Filer\tests\have_files", all_files=True)
+    # print(filer.total_files)
+    # filer.generate_file_stats_csv(r"E:\Text\Testing_files.csv")
+    # filer.show_folder_size_distribution()
+    # filer.generate_difference_file_csv(r"Filer\Filing\tests\have_files\Testing_files.csv", output_path="Same")
+    # filer.generate_file_stats_html(r"E:\Text\Testing_files.html")
