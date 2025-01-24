@@ -58,12 +58,13 @@ class FileStatsCollector:
     def __init__(self, root_folder, media_extensions: list = None, all_files=False, skip_folders: list=None):
         # self.media_extensions = media_extensions
         if media_extensions is None:
-            self.media_extensions = ['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif']
+            media_extensions = ['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif']
         if skip_folders is None:
             skip_folders = []
         self.root_folder = self.check_root_folder(root_folder)
         self.all_files = all_files
         self.skip_folders = skip_folders
+        self.media_extensions = media_extensions
         self.file_stats = self._gather_file_stats()
         self.file_types = [stat["File Type"] for stat in self.file_stats]
         self.total_files = len(self.file_stats)
@@ -741,10 +742,11 @@ Most Occurring File Type: {most_occurred}
         except Exception as e:
             print(f"Error printing summary stats: {e}")
 
-# if __name__ == "__main__":
-#     filer = FileStatsCollector(r"Filer\tests\have_files", all_files=True)
+if __name__ == "__main__":
+    filer = FileStatsCollector(r"Filer\tests\have_files", media_extensions=[".csv", ".txt", ".py", ".html", ".json", ".xml", ".log", ".md", ".yaml", ".yml", ".ini", ".config", ".conf", ".cfg", ".bat", ".sh", ".ps1", ".psm1", ".psd1", ".ps1xml", ".pssc", ".pssc", ".psh", ".psh", ".psc1", ".psc2", ".pfx", ".cer", ".crt", ".key", ".pem", ".pub", ".der", ".csr", ".p12", ".p7b", ".p7c", ".p7r", ".p7s", ".jks", ".keystore", ".bks", ".bks", ".jceks", ".p8", ".p8", ".asc", ".gpg", ".pgp", ".sig", ".md5", ".sha1", ".sha256", ".sha512", ".sha3"])
     # print(filer.total_files)
     # filer.generate_file_stats_csv(r"E:\Text\Testing_files.csv")
-    # filer.show_folder_size_distribution()
+    filer.show_folder_size_distribution()
+    filer.print_file_types()
     # filer.generate_difference_file_csv(r"Filer\Filing\tests\have_files\Testing_files.csv", output_path="Same")
     # filer.generate_file_stats_html(r"E:\Text\Testing_files.html")
