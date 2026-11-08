@@ -17,6 +17,7 @@ file (only for big files that survived stage 2). Hashing runs in a thread pool.
 from __future__ import annotations
 
 import csv
+import filecmp
 import hashlib
 import os
 import time
@@ -25,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from Filing.cache import HashCache
 from Filing.filestatser import FileStatsCollector
 from Filing.filters import parse_size
 from Filing.journal import MoveJournal, JOURNAL_DIR_NAME, undo_moves
@@ -82,11 +84,16 @@ class DuplicateFinder:
         file_stats (list): Reuse the file_stats of an existing FileStatsCollector instead of scanning again.
         journal / journal_dir: Journal of moves so they can be undone (see MoveJournal).
         max_workers (int): Hashing threads (default: Python's choice, based on CPU count).
+        use_cache (bool): Remember hashes between runs (default True) so unchanged files are not read
+            again. A file's cached hash is used only while its size and modification time are unchanged.
+            Stored in '<journal_dir or root/.filer_journal>/hash_cache.json'.
+        cache_dir (str): Folder for the cache file (default: the journal folder).
         filter_options: max_size, modified_after, modified_before, name_glob, name_regex (see FileStatsCollector).
     """
 
     def __init__(self, root_folder, destination_folder=None, skip_folders=None, min_size=1,
-                 file_stats=None, journal=True, journal_dir=None, max_workers=None, **filter_options):
+                 file_stats=None, journal=True, journal_dir=None, max_workers=None,
+                 use_cache=True, cache_dir=None, **filter_options):
         self.root_folder = root_folder
         self.destination_folder = destination_folder or os.path.join(root_folder, "Duplicates")
         self.min_size = max(1, parse_size(min_size) or 1)
@@ -98,12 +105,16 @@ class DuplicateFinder:
         self.moved_files = {}
         self._found_at = None
         self._journal = None
+        self._cache = HashCache(HashCache.default_path(root_folder, cache_dir or journal_dir)) if use_cache else None
+        self.cache_hits = 0
 
         if file_stats is None:
             skips = list(skip_folders) if skip_folders else []
             skips += [self.destination_folder, JOURNAL_DIR_NAME]
             if journal_dir:
                 skips.append(journal_dir)
+            if cache_dir:
+                skips.append(cache_dir)
             file_stats = FileStatsCollector(
                 root_folder, all_files=True, skip_folders=skips, min_size=self.min_size, **filter_options
             ).file_stats
@@ -117,6 +128,8 @@ class DuplicateFinder:
         Files that cannot be read are skipped and listed in self.errors.
         """
         self.errors = []
+        if self._cache is not None:
+            self._cache.hits = self._cache.misses = 0
         started = time.perf_counter()
         by_size = defaultdict(list)
         for stat in self._file_stats:
@@ -126,23 +139,54 @@ class DuplicateFinder:
         candidates = {key: paths for key, paths in by_size.items() if len(paths) > 1}
 
         # Stage 2: first/last 64 KB. Files up to 128 KB are covered completely, so they are final.
-        partial = self._refine(candidates, _partial_hash)
+        partial = self._refine(candidates, _partial_hash, "p")
         final = {key: paths for key, paths in partial.items() if key[0] <= 2 * PARTIAL_CHUNK}
         needs_full = {key: paths for key, paths in partial.items() if key[0] > 2 * PARTIAL_CHUNK}
 
         # Stage 3: whole-file hash, only for what is left.
-        final.update(self._refine(needs_full, _full_hash))
+        final.update(self._refine(needs_full, _full_hash, "f"))
+        self._save_cache()
 
         self.groups = sorted(
             (DuplicateGroup(size=key[0], digest=key[-1], files=sorted(paths)) for key, paths in final.items()),
             key=lambda group: (-group.wasted_bytes, group.files[0]),
         )
         self._found_at = time.time()
+        cache_note = f" ({self.cache_hits} hash(es) reused from cache)" if self._cache is not None else ""
         print(f"Checked {len(self._file_stats)} files, found {self.duplicate_count} duplicate file(s) "
-              f"in {len(self.groups)} group(s) in {time.perf_counter() - started:.2f} seconds.")
+              f"in {len(self.groups)} group(s) in {time.perf_counter() - started:.2f} seconds{cache_note}.")
         return self.groups
 
-    def _refine(self, groups, hash_function):
+    def _cached_hash(self, kind, hash_function, path, size):
+        """hash_function(path, size), or the remembered hash if the file is unchanged since it was made."""
+        if self._cache is None:
+            return hash_function(path, size)
+        info = os.stat(path)  # raises OSError for vanished files, handled by the caller
+        if info.st_size != size:
+            return hash_function(path, size)  # changed since the scan: do not use the cache
+        cached = self._cache.lookup(path, size, info.st_mtime_ns, kind)
+        if cached:
+            return cached
+        digest = hash_function(path, size)
+        self._cache.store(path, size, info.st_mtime_ns, kind, digest)
+        return digest
+
+    def _save_cache(self):
+        if self._cache is None:
+            return
+        self.cache_hits = self._cache.hits
+        try:
+            self._cache.prune(os.path.join(s["Source Folder"], s["File Name"]) for s in self._file_stats)
+            self._cache.save()
+        except OSError as e:
+            self.errors.append((self._cache.path, f"could not save hash cache: {e}"))
+
+    def clear_cache(self):
+        """Forget all remembered hashes (and delete the cache file)."""
+        if self._cache is not None:
+            self._cache.clear()
+
+    def _refine(self, groups, hash_function, kind):
         """Split each group by a content hash; groups that fall to one file disappear."""
         flat = [(key, path) for key, paths in groups.items() for path in paths]
         if not flat:
@@ -151,7 +195,7 @@ class DuplicateFinder:
         def safe_hash(item):
             key, path = item
             try:
-                return hash_function(path, key[0])
+                return self._cached_hash(kind, hash_function, path, key[0])
             except OSError as e:
                 self.errors.append((path, str(e)))
                 return None
@@ -279,11 +323,15 @@ class DuplicateFinder:
             print(f"Journal saved: {self._journal.path} (undo with undo_last_move())")
         return moved
 
-    def link_duplicates(self, keep="oldest", dry_run=False):
+    def link_duplicates(self, keep="oldest", dry_run=False, verify=True):
         """
         Replace every extra copy with a hard link to the kept file: same content, same paths, but the
         data is stored once. Needs the files on the same drive and a file system that supports hard
         links (NTFS does). Copies that changed since the search are left alone.
+
+        verify (bool): Compare the two files byte for byte before linking (default True). The hash
+        cache trusts size and modification time, so this protects against a file that was edited
+        without either changing. It reads each pair of files that would be linked.
 
         Hard links CANNOT be undone by undo_last_move(); use dry_run=True first, or move_duplicates()
         if you want to be able to undo.
@@ -300,6 +348,9 @@ class DuplicateFinder:
             try:
                 if os.path.samefile(keeper, extra):
                     continue  # already the same file
+                if verify and not filecmp.cmp(keeper, extra, shallow=False):
+                    self.errors.append((extra, "content differs from the kept file; skipped"))
+                    continue
                 if not dry_run:
                     temporary = extra + ".filer_link_tmp"
                     os.link(keeper, temporary)
