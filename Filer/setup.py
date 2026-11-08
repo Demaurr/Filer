@@ -1,11 +1,17 @@
+import re
+
 from setuptools import setup, find_packages
 
 with open("documentation.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
+# single source of truth for the version: Filing/__init__.py (read as text, so no import is needed)
+with open("Filing/__init__.py", "r", encoding="utf-8") as fh:
+    version = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M).group(1)
+
 setup(
     name='Filer',
-    version='1.5.0',
+    version=version,
     packages=["Filing"],
     author='Demaurr',
     author_email='demaurr@example.com',
@@ -20,9 +26,9 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
-        "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
     install_requires=[],
+    entry_points={"console_scripts": ["filer=Filing.cli:main"]},
     python_requires='>=3.9',
 )
