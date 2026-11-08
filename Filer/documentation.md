@@ -129,6 +129,8 @@ finder.link_duplicates()               # or: replace extra copies with hard link
 
 Files are compared in stages (same size, then a hash of the first and last 64 KB, then a hash of the whole file only if still needed), so most files are ruled out without being read in full. `keep='oldest'` (default), `'newest'`, `'first'` or `'shortest_path'` chooses the copy that stays. Empty files are ignored. Nothing is ever deleted. `link_duplicates()` needs files on the same drive and skips copies that changed after the search.
 
+**Hash cache:** `DuplicateFinder` remembers hashes in `<root>/.filer_journal/hash_cache.json` (change the folder with `cache_dir=`), so running it again only reads files that are new or changed. A remembered hash is used only while the file's size and modification time are exactly the same; files modified in the last two seconds are not remembered; entries for deleted files are removed. If the cache file is missing, damaged or from another version, it is ignored and rebuilt. Use `DuplicateFinder(..., use_cache=False)` to disable it and `finder.clear_cache()` to reset it. A file edited without changing its size or modification time would fool any cache like this, which is why `link_duplicates()` re-checks each pair byte for byte (`verify=True`) before linking.
+
 **Skipping folders:**
 
 `skip_folders` entries are matched exactly (case-insensitively on Windows):

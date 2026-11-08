@@ -11,7 +11,7 @@ Filer is a Python package for scanning folders, reporting on the files in them, 
 - **Dry run:** preview exactly where every file would go before anything is touched.
 - **Undo:** every move is recorded in a JSON journal, and the last run can be reversed without overwriting anything.
 - **Organise by rule:** sort files into subfolders by type, date, size, extension, a pattern such as `{type}/{year}/{month}`, or your own function.
-- **Duplicate finder:** find identical files quickly (by size, then partial hash, then full hash), then report them, move the extra copies aside (undoable) or replace them with hard links. Nothing is ever deleted.
+- **Duplicate finder:** find identical files quickly (by size, then partial hash, then full hash), then report them, move the extra copies aside (undoable) or replace them with hard links. Nothing is ever deleted. Hashes are remembered between runs, so repeat scans only read new or changed files.
 
 ## Classes
 

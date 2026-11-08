@@ -5,7 +5,7 @@ with open("documentation.md", "r", encoding="utf-8") as fh:
 
 setup(
     name='Filer',
-    version='1.4.0',
+    version='1.5.0',
     packages=["Filing"],
     author='Demaurr',
     author_email='demaurr@example.com',

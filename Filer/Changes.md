@@ -1,6 +1,15 @@
 # Changes
 All the Noteable changes will be stated here.
 
+## Version 1.5.0 - Unreleased
+
+### Added
+- **Hash cache** for `DuplicateFinder` (`Filing.HashCache`): hashes are remembered in `<root>/.filer_journal/hash_cache.json` (or `cache_dir`), so a repeat run does not read unchanged files again. A cached hash is used only while the file's size and modification time (nanoseconds) are exactly as before; files modified within the last two seconds are never cached; deleted files are pruned. A missing, corrupt or outdated cache is ignored. Turn it off with `use_cache=False`, wipe it with `clear_cache()`.
+- `link_duplicates(verify=True)` compares each pair of files byte for byte before linking, so a file edited without its size or modification time changing can never be replaced by mistake.
+
+### Changed
+- `list_journals()` / `undo_last_move()` now only consider real journal files, so other JSON files in `.filer_journal` (such as the hash cache) are never mistaken for a journal.
+
 ## Version 1.4.0 - Unreleased
 
 ### Added
