@@ -9,6 +9,7 @@ import csv
 from datetime import datetime
 from collections import Counter
 from multiprocessing import Pool
+import time
 
 class FileStatsCollector:
     """
@@ -55,6 +56,9 @@ class FileStatsCollector:
     """
 
 
+    # Below this many folders, scanning serially is faster than starting a process pool
+    _PARALLEL_MIN_FOLDERS = 32
+
     def __init__(self, root_folder, media_extensions: list = None, all_files=False, skip_folders: list=None):
         # self.media_extensions = media_extensions
         if media_extensions is None:
@@ -65,7 +69,9 @@ class FileStatsCollector:
         self.all_files = all_files
         self.skip_folders = skip_folders
         self.media_extensions = media_extensions
+        start = time.perf_counter()
         self.file_stats = self._gather_file_stats()
+        print(f"Gathered {len(self.file_stats)} file stats in {time.perf_counter() - start:.2f} seconds.")
         self.file_types = [stat["File Type"] for stat in self.file_stats]
         self.total_files = len(self.file_stats)
 
@@ -153,8 +159,8 @@ h2 {{
         Returns:
             bool: True if the file has a valid media extension, False otherwise.
         """
-        return any(filename.lower().endswith(ext) for ext in self.media_extensions)
-    
+        return filename.lower().endswith(tuple(ext.lower() for ext in self.media_extensions))
+
     def check_root_folder(self, folder):
         """
         Check if the specified root folder exists; raise an error if it doesn't.
@@ -206,13 +212,13 @@ h2 {{
         Returns:
             str: The formatted file size with appropriate units (B, KB, MB, GB, TB).
         """
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
             if size < 1024.0:
                 break
             size /= 1024.0
         return "{:.2f} {}".format(size, unit)
 
-    def process_files(self, foldername, all_files, is_media_file, format_size):
+    def process_files(self, foldername, all_files, media_extensions, format_size):
         """
         Process files within a folder and collect file statistics.
 
@@ -226,31 +232,86 @@ h2 {{
             list: A list of dictionaries containing file statistics.
         """
         folder_stats = []
-        counter = 0
+        extensions = tuple(ext.lower() for ext in media_extensions)
         try:
             with os.scandir(foldername) as entries:
-                print("Gathering data from:", foldername)
                 for entry in entries:
                     if entry.is_file():
                         filename = entry.name
-                        source_path = os.path.join(foldername, filename)
-                        if all_files or is_media_file(filename):
-                            counter += 1
+                        lowered = filename.lower()
+                        if all_files or lowered.endswith(extensions):
+                            stat_info = entry.stat()
                             folder_stats.append({
                                 'File Name': filename,
-                                'File Type': os.path.splitext(filename)[1].lower(),
-                                'File Size (Bytes)': entry.stat().st_size,
-                                'File Size (Human Readable)': format_size(entry.stat().st_size),
-                                'Creation Date': datetime.fromtimestamp(entry.stat().st_ctime).strftime('%Y-%m-%d %H:%M:%S'),
-                                'Modification Date': datetime.fromtimestamp(entry.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                                'File Type': os.path.splitext(lowered)[1],
+                                'File Size (Bytes)': stat_info.st_size,
+                                'File Size (Human Readable)': format_size(stat_info.st_size),
+                                'Creation Date': self.format_timestamp(self.get_creation_timestamp(stat_info)),
+                                'Modification Date': self.format_timestamp(stat_info.st_mtime),
                                 'Source Folder': foldername
                             })
-                            
-                if counter:
-                    print(f"\t>Total Files From {foldername}: {counter}")
         except Exception as e:
             print(f"Error gathering file stats in folder '{foldername}': {e}")
         return folder_stats
+    
+    @staticmethod
+    def get_creation_timestamp(stat_info):
+        """
+        Return the creation time of a stat result as a timestamp.
+        Uses st_birthtime when the platform/Python provides it (Python 3.12+ on Windows,
+        macOS, BSD) and falls back to st_ctime (creation time on older Windows Pythons).
+        """
+        birth = getattr(stat_info, 'st_birthtime', None)
+        return stat_info.st_ctime if birth is None else birth
+
+    @staticmethod
+    def format_timestamp(timestamp):
+        """Format a timestamp as 'YYYY-MM-DD HH:MM:SS' (local time)."""
+        return datetime.fromtimestamp(timestamp).isoformat(sep=' ', timespec='seconds')
+
+    @staticmethod
+    def _split_skip_folders(skip_folders):
+        """Split skip entries into (set of folder names, set of absolute folder paths), normalised for comparison."""
+        names, paths = set(), set()
+        for skip in skip_folders or ():
+            skip = str(skip).strip()
+            if not skip:
+                continue
+            if os.sep in skip or (os.altsep and os.altsep in skip) or os.path.splitdrive(skip)[0]:
+                paths.add(os.path.normcase(os.path.abspath(skip)))
+            else:
+                names.add(os.path.normcase(skip))
+        return names, paths
+
+    @staticmethod
+    def walk_with_scandir(root, skip_folders=None):
+        """
+        Yield every folder under root (including root) without descending into skipped folders.
+
+        Each skip_folders entry is matched exactly, not as a substring:
+          - a plain name (e.g. '.git') skips every folder with exactly that name (the root
+            folder itself is never skipped by name);
+          - a path (contains a path separator or drive, e.g. the destination folder) skips
+            that folder and everything below it.
+        Matching ignores case on Windows. Empty entries are ignored.
+        """
+        skip_names, skip_paths = FileStatsCollector._split_skip_folders(skip_folders)
+        stack = [root]
+        while stack:
+            folder = stack.pop()
+            if skip_names or skip_paths:
+                if folder != root and os.path.normcase(os.path.basename(folder)) in skip_names:
+                    continue
+                if skip_paths and os.path.normcase(os.path.abspath(folder)) in skip_paths:
+                    continue
+            yield folder
+            try:
+                with os.scandir(folder) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+            except PermissionError:
+                pass
 
     def _gather_file_stats(self):
         """
@@ -263,16 +324,39 @@ h2 {{
         file_stats = []
 
         try:
-            with Pool() as pool:
-                folder_stats_lists = pool.starmap(self.process_files, 
-                                                  [(foldername, all_files, self.is_media_file, self.format_size) 
-                                                   for foldername, _, _ in os.walk(self.root_folder) 
-                                                   if all(skip_folder not in foldername for skip_folder in self.skip_folders)])
-                file_stats = [file_stat for folder_stats in folder_stats_lists for file_stat in folder_stats]
+            print(f"Gathering folders....")
+            folder_list = list(self.walk_with_scandir(self.root_folder, self.skip_folders))
+            print(f"Total folders found: {len(folder_list)}")
+            tasks = [(folder, all_files, self.media_extensions, self.format_size) for folder in folder_list]
+            if len(tasks) < self._PARALLEL_MIN_FOLDERS:
+                # Starting worker processes costs more than scanning a few folders
+                folder_stats_lists = [self.process_files(*task) for task in tasks]
+            else:
+                chunksize = max(1, min(256, len(tasks) // ((os.cpu_count() or 1) * 4)))
+                with Pool() as pool:
+                    folder_stats_lists = pool.starmap(self.process_files, tasks, chunksize=chunksize)
+            file_stats = [file_stat for folder_stats in folder_stats_lists for file_stat in folder_stats]
+            print(len(folder_stats_lists))
         except Exception as e:
+            file_stats = []
             print(f"Unexpected error occurred: {e}")
+            return file_stats
 
         return file_stats
+    
+    def _create_empty_csv(self, csv_file_path):
+        """
+        Creates an empty CSV file with the standard fieldnames.
+        """
+        fieldnames = ['File Name', 'File Type', 'File Size (Bytes)', 'File Size (Human Readable)',
+                      'Creation Date', 'Modification Date', 'Source Folder']
+        try:
+            with open(csv_file_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+            print(f"\nEmpty File Stats CSV file generated: {csv_file_path}")
+        except Exception as e:
+            print(f"Error generating empty file stats CSV: {e}")
     
     @staticmethod
     def get_file_stats(file_path):
@@ -295,8 +379,8 @@ h2 {{
                 'File Type': os.path.splitext(filename)[1].lower(),
                 'File Size (Bytes)': file_stat.st_size,
                 'File Size (Human Readable)': FileStatsCollector.format_size(file_stat.st_size),
-                'Creation Date': datetime.fromtimestamp(file_stat.st_ctime).strftime('%Y-%m-%d %H:%M:%S'),
-                'Modification Date': datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                'Creation Date': FileStatsCollector.format_timestamp(FileStatsCollector.get_creation_timestamp(file_stat)),
+                'Modification Date': FileStatsCollector.format_timestamp(file_stat.st_mtime),
                 'Source Folder': foldername
             })
             # print(file_stats)
@@ -405,19 +489,22 @@ h2 {{
     def generate_file_stats_csv(
             self, 
             csv_path=None,
-            sort_by="File Name"
+            sort_by="File Name",
+            allow_empty=False
         ):
         """
         Generate a CSV file containing detailed statistics of media files or all files.
         Parameters:
             csv_path (str): Optonal Path to save the stats csv in. Default will be the root folder with current datetime
             sort_by (str): Key to sort the values of the dict by default is "File Name"
+            allow_empty (bool): If True and no files were found, still create a CSV containing
+                only the header row (returns 0). If False, nothing is created (returns -1).
         """
-        if not self.file_stats:
+        if not self.file_stats and not allow_empty:
             print("NO Data FOUND: Nothing To Create Csv of")
             return -1
 
-        root_folder_basename = os.path.basename(self.root_folder)
+        root_folder_basename = os.path.basename(os.path.normpath(self.root_folder))
 
         if not root_folder_basename:  # Handle drive letters
             drive_letter = self.root_folder.split(":")[0]
@@ -426,6 +513,10 @@ h2 {{
         current_time= datetime.now().strftime('%Y%m%d_%H%M%S')
         csv_file_name = f'{root_folder_basename}_files_stats_{current_time}.csv'
         csv_file_path = os.path.join(self.root_folder, csv_file_name) if csv_path is None else csv_path
+
+        if not self.file_stats:
+            self._create_empty_csv(csv_file_path)
+            return 0
 
         try:
             with open(csv_file_path, 'w', newline='', encoding='utf-8') as csvfile:
@@ -477,7 +568,7 @@ h2 {{
             root_folder_basename = os.path.basename(self.root_folder)
             current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
             difference_csv_name = f'{root_folder_basename}_difference_{current_time}.csv'
-            difference_csv_path = os.path.join(self.root_folder, difference_csv_name) if output_path is None else csv_path
+            difference_csv_path = os.path.join(self.root_folder, difference_csv_name) if output_path is not None else csv_path
 
             with open(difference_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = ['File Name', 'File Type', 'File Size (Bytes)', 'File Size (Human Readable)',
