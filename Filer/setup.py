@@ -5,7 +5,7 @@ with open("documentation.md", "r", encoding="utf-8") as fh:
 
 setup(
     name='Filer',
-    version='1.2.1',
+    version='1.3.0',
     packages=["Filing"],
     author='Demaurr',
     author_email='demaurr@example.com',
@@ -13,8 +13,10 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/demaurr/filer",
+    license="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
     install_requires=[],

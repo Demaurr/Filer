@@ -79,6 +79,30 @@ if __name__ == "__main__":
 
 This script prompts the user to enter the root path to gather file information, whether to gather statistics for all files, and the filename and folder path to save the statistics files. It then utilizes the Filing package to gather and analyze file statistics, generate HTML and CSV reports, and save them to the specified location.
 
+**Skipping folders:**
+
+`skip_folders` entries are matched exactly (case-insensitively on Windows):
+
+- A plain name such as `'.git'` or `'node_modules'` skips every folder with exactly that name, at any depth (`'.github'` is not skipped by `'.git'`).
+- A path such as `r'C:\Photos\Backup'` skips that folder and everything below it.
+- Empty entries are ignored, and the root folder is never skipped by its own name.
+
+Skipped folders are never scanned, so skipping large folders such as `node_modules` or `.git` makes gathering faster. Folders are scanned in parallel for large trees, so scripts should be run under an `if __name__ == "__main__":` guard (as in the example above), which Windows requires for multiprocessing.
+
+**Empty results:**
+
+`generate_file_stats_csv()` returns `-1` and creates nothing when no files were found. Pass `allow_empty=True` to get a CSV that contains only the header row instead.
+
+**Tests:**
+
+From the repository root:
+
+```
+PYTHONPATH=Filer python -m unittest Filer.tests.tests_filestatser_extra Filer.tests.tests_gatherer Filer.tests.tests_filestatser
+```
+
+(On PowerShell, set `$env:PYTHONPATH = "Filer"` first.) `tests_filestatser.py` uses relative paths, so it must be run from the repository root.
+
 **Documentation:**
 
 Detailed documentation for the Filing package can be found in the README.md file of the project's GitHub repository. It includes information about the package's classes, methods, usage examples, and installation instructions.
