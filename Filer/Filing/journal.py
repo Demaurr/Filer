@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from datetime import datetime
 
 JOURNAL_DIR_NAME = ".filer_journal"
 JOURNAL_VERSION = 1
+_JOURNAL_NAME = re.compile(r"^[a-z]+_\d{8}_\d{6}_\d{6}\.json$")  # e.g. move_20261109_143005_123456.json
 
 
 def _write_json_atomic(path, data):
@@ -73,11 +75,11 @@ class MoveJournal:
 
 
 def list_journals(journal_dir):
-    """Journal files in journal_dir, oldest first."""
+    """Journal files in journal_dir, oldest first (other files there, such as the hash cache, are ignored)."""
     if not os.path.isdir(journal_dir):
         return []
     return [os.path.join(journal_dir, name) for name in sorted(os.listdir(journal_dir))
-            if name.endswith(".json")]
+            if _JOURNAL_NAME.match(name)]
 
 
 def load_journal(path):
