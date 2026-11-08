@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 
+from Filing.progress import STAGE_PLAN, STAGE_MOVE
+
 _NUMBER_SUFFIX = re.compile(r"^(.*?)\(\d+\)$")
 
 
@@ -44,14 +46,18 @@ def unique_destination(path, reserved=None):
     return candidate
 
 
-def plan_moves(pairs, reserved=None):
+def plan_moves(pairs, reserved=None, progress=None):
     """
     Turn (source, wanted_destination) pairs into a conflict-free list of (source, destination).
     Files already at their destination are left out. Nothing on disk is touched.
+    progress: optional function(stage, done, total).
     """
     reserved = set() if reserved is None else reserved
     plan = []
-    for source, destination in pairs:
+    pairs = list(pairs)
+    for number, (source, destination) in enumerate(pairs, start=1):
+        if progress is not None:
+            progress(STAGE_PLAN, number, len(pairs))
         if _key(source) == _key(destination):
             continue
         destination = unique_destination(destination, reserved)
@@ -60,12 +66,13 @@ def plan_moves(pairs, reserved=None):
     return plan
 
 
-def execute_moves(plan, journal=None, verbose=True):
+def execute_moves(plan, journal=None, verbose=True, progress=None):
     """
     Perform a planned list of (source, destination) moves.
 
     A failing file is reported and skipped; the rest still move. If a journal is given, every
     move (and every folder created) is recorded and the journal is saved, even after errors.
+    progress: optional function(stage, done, total), called after every file.
 
     Returns:
         tuple: (moved, failed) where moved is {source: final_destination} and
@@ -73,7 +80,7 @@ def execute_moves(plan, journal=None, verbose=True):
     """
     moved, failed = {}, []
     try:
-        for source, destination in plan:
+        for number, (source, destination) in enumerate(plan, start=1):
             try:
                 destination = unique_destination(destination)  # something may have appeared since planning
                 folder = os.path.dirname(destination)
@@ -90,6 +97,8 @@ def execute_moves(plan, journal=None, verbose=True):
             except Exception as e:
                 failed.append((source, str(e)))
                 print(f"Error moving '{source}': {e}")
+            if progress is not None:
+                progress(STAGE_MOVE, number, len(plan))
     finally:
         if journal is not None:
             journal.save()

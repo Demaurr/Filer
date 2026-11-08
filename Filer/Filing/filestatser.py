@@ -11,6 +11,7 @@ from collections import Counter
 from multiprocessing import Pool
 import time
 from Filing.filters import FileFilter
+from Filing.progress import make_reporter, STAGE_SCAN, STAGE_READ
 
 class FileStatsCollector:
     """
@@ -74,8 +75,14 @@ class FileStatsCollector:
             modified_after=None,
             modified_before=None,
             name_glob=None,
-            name_regex=None
+            name_regex=None,
+            progress=None,
+            verbose=True
         ):
+        # progress: function(stage, done, total) called while scanning (see Filing.progress).
+        # verbose: set False to silence the informational messages printed while scanning.
+        self.verbose = verbose
+        self._progress = make_reporter(progress)
         # Filters (see Filing.filters.FileFilter) are applied during the scan, so files that do not
         # match are never stored. Sizes accept bytes or strings like '10MB'; times accept
         # datetime/date, a timestamp or an ISO string like '2026-11-09'.
@@ -97,9 +104,14 @@ class FileStatsCollector:
         self.media_extensions = media_extensions
         start = time.perf_counter()
         self.file_stats = self._gather_file_stats()
-        print(f"Gathered {len(self.file_stats)} file stats in {time.perf_counter() - start:.2f} seconds.")
+        self._say(f"Gathered {len(self.file_stats)} file stats in {time.perf_counter() - start:.2f} seconds.")
         self.file_types = [stat["File Type"] for stat in self.file_stats]
         self.total_files = len(self.file_stats)
+
+    def _say(self, message):
+        """Print an informational message unless verbose is False."""
+        if getattr(self, 'verbose', True):
+            print(message)
 
     def get_styles(self):
         styles = f"""
@@ -257,12 +269,15 @@ h2 {{
         Returns:
             list: A list of dictionaries containing file statistics.
         """
-        folder_stats = []
-        extensions = tuple(ext.lower() for ext in media_extensions)
         if file_filter is None:
             file_filter = getattr(self, 'file_filter', None)
-        if file_filter is not None and not file_filter.active:
-            file_filter = None
+        return self._scan_folder(foldername, all_files, media_extensions, format_size, file_filter)
+
+    @staticmethod
+    def _scan_folder(foldername, all_files, media_extensions, format_size, file_filter=None):
+        """Worker behind process_files. Static, so a process pool only has to send plain data."""
+        folder_stats = []
+        extensions = tuple(ext.lower() for ext in media_extensions)
         try:
             with os.scandir(foldername) as entries:
                 for entry in entries:
@@ -280,8 +295,8 @@ h2 {{
                                 'File Type': os.path.splitext(lowered)[1],
                                 'File Size (Bytes)': stat_info.st_size,
                                 'File Size (Human Readable)': format_size(stat_info.st_size),
-                                'Creation Date': self.format_timestamp(self.get_creation_timestamp(stat_info)),
-                                'Modification Date': self.format_timestamp(stat_info.st_mtime),
+                                'Creation Date': FileStatsCollector.format_timestamp(FileStatsCollector.get_creation_timestamp(stat_info)),
+                                'Modification Date': FileStatsCollector.format_timestamp(stat_info.st_mtime),
                                 'Source Folder': foldername
                             })
         except Exception as e:
@@ -347,6 +362,10 @@ h2 {{
             except PermissionError:
                 pass
 
+    def _process_task(self, task):
+        """process_files for one task; used by the process pool only when a subclass overrides process_files."""
+        return self.process_files(*task)
+
     def _gather_file_stats(self):
         """
         Scan the root folder for media files, collect file statistics, and return the obtained statistics.
@@ -358,19 +377,36 @@ h2 {{
         file_stats = []
 
         try:
-            print(f"Gathering folders....")
-            folder_list = list(self.walk_with_scandir(self.root_folder, self.skip_folders))
-            print(f"Total folders found: {len(folder_list)}")
+            self._say(f"Gathering folders....")
+            progress = self._progress
+            folder_list = []
+            for folder in self.walk_with_scandir(self.root_folder, self.skip_folders):
+                folder_list.append(folder)
+                progress(STAGE_SCAN, len(folder_list), None)
+            progress(STAGE_SCAN, len(folder_list), len(folder_list))
+            self._say(f"Total folders found: {len(folder_list)}")
             tasks = [(folder, all_files, self.media_extensions, self.format_size) for folder in folder_list]
-            if len(tasks) < self._PARALLEL_MIN_FOLDERS:
+            total = len(tasks)
+            file_filter = self.file_filter if self.file_filter.active else None
+            folder_stats_lists = []
+            if total < self._PARALLEL_MIN_FOLDERS:
                 # Starting worker processes costs more than scanning a few folders
-                folder_stats_lists = [self.process_files(*task) for task in tasks]
+                for task in tasks:
+                    folder_stats_lists.append(self.process_files(*task))
+                    progress(STAGE_READ, len(folder_stats_lists), total)
             else:
-                chunksize = max(1, min(256, len(tasks) // ((os.cpu_count() or 1) * 4)))
+                chunksize = max(1, min(256, total // ((os.cpu_count() or 1) * 4)))
+                if type(self).process_files is FileStatsCollector.process_files:
+                    # Workers get plain data only (never the collector itself, which may hold callbacks)
+                    worker, worker_tasks = _scan_task, [task + (file_filter,) for task in tasks]
+                else:
+                    worker, worker_tasks = self._process_task, tasks  # a subclass changed process_files
                 with Pool() as pool:
-                    folder_stats_lists = pool.starmap(self.process_files, tasks, chunksize=chunksize)
+                    for folder_stats in pool.imap(worker, worker_tasks, chunksize=chunksize):
+                        folder_stats_lists.append(folder_stats)
+                        progress(STAGE_READ, len(folder_stats_lists), total)
             file_stats = [file_stat for folder_stats in folder_stats_lists for file_stat in folder_stats]
-            print(len(folder_stats_lists))
+            self._say(len(folder_stats_lists))
         except Exception as e:
             file_stats = []
             print(f"Unexpected error occurred: {e}")
@@ -450,15 +486,20 @@ h2 {{
             print(f"An error occurred while sorting by key '{key}': {e}")
             return file_stats
 
-    def generate_file_stats_html(self, html_path=None):
+    def generate_file_stats_html(self, html_path=None, confirm=True):
         """
         Generate a pretty HTML report of file statistics.
+
+        Parameters:
+            html_path (str): Where to save the report (default: in the root folder).
+            confirm (bool): For more than 1500 files a question is asked first (memory use);
+                pass False to skip the question (e.g. in scripts).
         """
         if not self.file_stats:
             print("NO Data FOUND: Nothing To Create Html of")
             return -1
 
-        if len(self.file_stats) > 1500:
+        if confirm and len(self.file_stats) > 1500:
             user_input = input("Warning: Generating HTML report for a large number of files can consume a significant amount of memory. Do you want to continue? (yes/no): ").strip().lower()
             if user_input != 'yes':
                 print("HTML report generation aborted.")
@@ -866,6 +907,11 @@ Most Occurring File Type: {most_occurred}
             print(summary_stats)
         except Exception as e:
             print(f"Error printing summary stats: {e}")
+
+def _scan_task(task):
+    """Process-pool worker: scan one folder. task = (folder, all_files, extensions, format_size, file_filter)."""
+    return FileStatsCollector._scan_folder(*task)
+
 
 if __name__ == "__main__":
     filer = FileStatsCollector(r"Filer\tests\have_files", media_extensions=[".csv", ".txt", ".py", ".html", ".json", ".xml", ".log", ".md", ".yaml", ".yml", ".ini", ".config", ".conf", ".cfg", ".bat", ".sh", ".ps1", ".psm1", ".psd1", ".ps1xml", ".pssc", ".pssc", ".psh", ".psh", ".psc1", ".psc2", ".pfx", ".cer", ".crt", ".key", ".pem", ".pub", ".der", ".csr", ".p12", ".p7b", ".p7c", ".p7r", ".p7s", ".jks", ".keystore", ".bks", ".bks", ".jceks", ".p8", ".p8", ".asc", ".gpg", ".pgp", ".sig", ".md5", ".sha1", ".sha256", ".sha512", ".sha3"])

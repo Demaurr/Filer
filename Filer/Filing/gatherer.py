@@ -55,8 +55,12 @@ class MediaGatherer(FileStatsCollector):
             organize_by=None,
             journal=True,
             journal_dir=None,
+            progress=None,
+            verbose=True,
             **filter_options
         ):
+        # progress: function(stage, done, total) called while scanning and moving (see Filing.progress).
+        # verbose: set False to silence the informational messages (errors are always printed).
         # organize_by: preset ('type', 'date', 'size', 'extension'), a pattern like '{type}/{year}'
         #     (see Filing.organizer), an Organizer, or a function(stats dict) -> relative folder.
         # journal / journal_dir: keep a JSON log of every move so it can be undone with
@@ -78,11 +82,15 @@ class MediaGatherer(FileStatsCollector):
         self._journal = None
         self.last_journal_path = None
         self.failed_moves = []
+        self._move_offset = 0
+        self._move_total = None
         super().__init__(
             root_folder,
             media_extensions=media_extensions,
             skip_folders=skip_folders,
             all_files=all_files,
+            progress=progress,
+            verbose=verbose,
             **filter_options)
         self.moved_files = {}
         self.file_sources = []
@@ -127,7 +135,7 @@ class MediaGatherer(FileStatsCollector):
             (os.path.join(stat['Source Folder'], stat['File Name']), self._destination_path(stat, destination_folder))
             for stat in files_to_move
         ]
-        return dict(plan_moves(pairs))
+        return dict(plan_moves(pairs, progress=self._progress if self._progress.enabled else None))
 
     def move_files_to_destination(self, files_to_move, destination_folder, move_all_files=False, dry_run=False):
         """
@@ -141,7 +149,7 @@ class MediaGatherer(FileStatsCollector):
         """
         try:
             if not files_to_move:
-                print("\nNO FILEs TO MOVE. ^<>^")
+                self._say("\nNO FILEs TO MOVE. ^<>^")
                 return -1
 
             if dry_run:
@@ -153,12 +161,15 @@ class MediaGatherer(FileStatsCollector):
             ]
             plan = plan_moves(pairs)
             self.dest_folder = destination_folder
-            moved, failed = execute_moves(plan, journal=self._get_journal())
+            move_progress = None
+            if self._progress.enabled:
+                move_progress = self._progress.offset(self._move_offset, self._move_total or len(plan))
+            moved, failed = execute_moves(plan, journal=self._get_journal(), verbose=self.verbose, progress=move_progress)
             # storing source path and destination path of the moved files in a dict {source_path: destination}
             self.moved_files.update(moved)
             self.failed_moves.extend(failed)
 
-            print(f"Total Files Moved: {len(moved)}")
+            self._say(f"Total Files Moved: {len(moved)}")
         except Exception as e:
             print(f"Error moving files to destination folder: {e}")
 
@@ -184,9 +195,9 @@ class MediaGatherer(FileStatsCollector):
         """
         result = undo_moves(journal, root_folder=self.root_folder, journal_dir=self.journal_dir, dry_run=dry_run)
         verb = "Would restore" if dry_run else "Restored"
-        print(f"{verb} {len(result['restored'])} file(s) from {result['journal']}")
+        self._say(f"{verb} {len(result['restored'])} file(s) from {result['journal']}")
         for item in result["skipped"]:
-            print(f"\tSkipped {item['source']}: {item['reason']}")
+            self._say(f"\tSkipped {item['source']}: {item['reason']}")
         if not dry_run:
             for original in result["restored"].values():
                 self.moved_files.pop(original, None)
@@ -263,11 +274,11 @@ class MediaGatherer(FileStatsCollector):
 
             if dry_run:
                 plan = self.preview_moves(files_to_move, destination_folder)
-                print(f"\nDRY RUN: {len(plan)} file(s) would be moved to {destination_folder} (nothing was changed)")
+                self._say(f"\nDRY RUN: {len(plan)} file(s) would be moved to {destination_folder} (nothing was changed)")
                 for source, destination in list(plan.items())[:20]:
-                    print(f"\t{source}  ->  {destination}")
+                    self._say(f"\t{source}  ->  {destination}")
                 if len(plan) > 20:
-                    print(f"\t... and {len(plan) - 20} more")
+                    self._say(f"\t... and {len(plan) - 20} more")
                 return plan
 
             self._journal = None  # every run gets its own journal
@@ -277,8 +288,9 @@ class MediaGatherer(FileStatsCollector):
                 self.move_files_to_destination(files_to_move, destination_folder, move_all)
             if self._journal is not None and self._journal.path:
                 self.last_journal_path = self._journal.path
-                print(f"Journal saved: {self.last_journal_path} (undo with undo_last_move())")
-            self.show_moved_stats()
+                self._say(f"Journal saved: {self.last_journal_path} (undo with undo_last_move())")
+            if self.verbose:
+                self.show_moved_stats()
             return dict(self.moved_files)
         except Exception as e:
             print(f"Error gathering media: {e}")
@@ -294,14 +306,18 @@ class MediaGatherer(FileStatsCollector):
         """
         from time import sleep
         try:
+            self._move_total = len(files_to_move)  # progress counts continue across batches
             for i in range(0, len(files_to_move), batch_size):
                 batch = files_to_move[i:i + batch_size]
+                self._move_offset = i
                 self.move_files_to_destination(destination_folder=destination_folder, files_to_move=batch)
-                print(f"Moved batch {i // batch_size + 1} of {len(files_to_move) // batch_size + 1}")
+                self._say(f"Moved batch {i // batch_size + 1} of {len(files_to_move) // batch_size + 1}")
                 if delay:
                     sleep(delay)
         except Exception as e:
             print(f"An Exception Occurred while Batch Moving {e}")
+        finally:
+            self._move_offset, self._move_total = 0, None
 
     def show_moved_stats(self):
         """
@@ -388,6 +404,8 @@ class Gatherer(MediaGatherer):
             organize_by=None,
             journal=True,
             journal_dir=None,
+            progress=None,
+            verbose=True,
             **filter_options
         ):
         if extensions is None:
@@ -410,6 +428,8 @@ class Gatherer(MediaGatherer):
             organize_by=organize_by,
             journal=journal,
             journal_dir=journal_dir,
+            progress=progress,
+            verbose=verbose,
             **filter_options
             )
         self.extensions = []

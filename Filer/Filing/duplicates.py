@@ -20,6 +20,7 @@ import csv
 import filecmp
 import hashlib
 import os
+import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,7 @@ from Filing.filestatser import FileStatsCollector
 from Filing.filters import parse_size
 from Filing.journal import MoveJournal, JOURNAL_DIR_NAME, undo_moves
 from Filing.mover import plan_moves, execute_moves
+from Filing.progress import make_reporter, STAGE_HASH_PARTIAL, STAGE_HASH_FULL, STAGE_LINK
 
 PARTIAL_CHUNK = 64 * 1024
 FULL_BUFFER = 1024 * 1024
@@ -88,12 +90,16 @@ class DuplicateFinder:
             again. A file's cached hash is used only while its size and modification time are unchanged.
             Stored in '<journal_dir or root/.filer_journal>/hash_cache.json'.
         cache_dir (str): Folder for the cache file (default: the journal folder).
+        progress: function(stage, done, total) called while scanning, hashing, moving and linking (see Filing.progress).
+        verbose (bool): Set False to silence informational messages (reports such as print_summary still print).
         filter_options: max_size, modified_after, modified_before, name_glob, name_regex (see FileStatsCollector).
     """
 
     def __init__(self, root_folder, destination_folder=None, skip_folders=None, min_size=1,
                  file_stats=None, journal=True, journal_dir=None, max_workers=None,
-                 use_cache=True, cache_dir=None, **filter_options):
+                 use_cache=True, cache_dir=None, progress=None, verbose=True, **filter_options):
+        self.verbose = verbose
+        self._progress = make_reporter(progress)
         self.root_folder = root_folder
         self.destination_folder = destination_folder or os.path.join(root_folder, "Duplicates")
         self.min_size = max(1, parse_size(min_size) or 1)
@@ -105,7 +111,8 @@ class DuplicateFinder:
         self.moved_files = {}
         self._found_at = None
         self._journal = None
-        self._cache = HashCache(HashCache.default_path(root_folder, cache_dir or journal_dir)) if use_cache else None
+        self._cache_path = HashCache.default_path(root_folder, cache_dir or journal_dir)
+        self._cache = HashCache(self._cache_path) if use_cache else None
         self.cache_hits = 0
 
         if file_stats is None:
@@ -116,7 +123,8 @@ class DuplicateFinder:
             if cache_dir:
                 skips.append(cache_dir)
             file_stats = FileStatsCollector(
-                root_folder, all_files=True, skip_folders=skips, min_size=self.min_size, **filter_options
+                root_folder, all_files=True, skip_folders=skips, min_size=self.min_size,
+                progress=self._progress, verbose=verbose, **filter_options
             ).file_stats
         self._file_stats = file_stats
 
@@ -153,9 +161,13 @@ class DuplicateFinder:
         )
         self._found_at = time.time()
         cache_note = f" ({self.cache_hits} hash(es) reused from cache)" if self._cache is not None else ""
-        print(f"Checked {len(self._file_stats)} files, found {self.duplicate_count} duplicate file(s) "
+        self._say(f"Checked {len(self._file_stats)} files, found {self.duplicate_count} duplicate file(s) "
               f"in {len(self.groups)} group(s) in {time.perf_counter() - started:.2f} seconds{cache_note}.")
         return self.groups
+
+    def _say(self, message):
+        if self.verbose:
+            print(message)
 
     def _cached_hash(self, kind, hash_function, path, size):
         """hash_function(path, size), or the remembered hash if the file is unchanged since it was made."""
@@ -185,12 +197,18 @@ class DuplicateFinder:
         """Forget all remembered hashes (and delete the cache file)."""
         if self._cache is not None:
             self._cache.clear()
+        else:
+            HashCache(self._cache_path).clear()  # caching is off for this run, but the file may still exist
 
     def _refine(self, groups, hash_function, kind):
         """Split each group by a content hash; groups that fall to one file disappear."""
         flat = [(key, path) for key, paths in groups.items() for path in paths]
         if not flat:
             return {}
+
+        stage = STAGE_HASH_PARTIAL if kind == "p" else STAGE_HASH_FULL
+        counter = {"done": 0}
+        counter_lock = threading.Lock()
 
         def safe_hash(item):
             key, path = item
@@ -199,6 +217,11 @@ class DuplicateFinder:
             except OSError as e:
                 self.errors.append((path, str(e)))
                 return None
+            finally:
+                with counter_lock:
+                    counter["done"] += 1
+                    done = counter["done"]
+                self._progress(stage, done, len(flat))
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             digests = list(pool.map(safe_hash, flat))
@@ -309,18 +332,19 @@ class DuplicateFinder:
                  for _, extra in self._extra_copies(keep)]
         plan = plan_moves(pairs)
         if dry_run:
-            print(f"\nDRY RUN: {len(plan)} duplicate(s) would be moved to {destination_folder} (nothing was changed)")
+            self._say(f"\nDRY RUN: {len(plan)} duplicate(s) would be moved to {destination_folder} (nothing was changed)")
             return dict(plan)
         if not plan:
-            print("\nNo duplicates to move.")
+            self._say("\nNo duplicates to move.")
             return {}
         self._journal = MoveJournal(self.root_folder, self.journal_dir, operation="duplicates") if self.journal_enabled else None
-        moved, failed = execute_moves(plan, journal=self._journal)
+        moved, failed = execute_moves(plan, journal=self._journal, verbose=self.verbose,
+                                      progress=self._progress if self._progress.enabled else None)
         self.errors.extend(failed)
         self.moved_files.update(moved)
-        print(f"Total Duplicates Moved: {len(moved)}")
+        self._say(f"Total Duplicates Moved: {len(moved)}")
         if self._journal is not None and self._journal.path:
-            print(f"Journal saved: {self._journal.path} (undo with undo_last_move())")
+            self._say(f"Journal saved: {self._journal.path} (undo with undo_last_move())")
         return moved
 
     def link_duplicates(self, keep="oldest", dry_run=False, verify=True):
@@ -340,7 +364,9 @@ class DuplicateFinder:
             dict: {extra_copy: kept_file} for every copy that was (or, in a dry run, would be) linked.
         """
         linked = {}
-        for keeper, extra in self._extra_copies(keep):
+        pairs = self._extra_copies(keep)
+        for number, (keeper, extra) in enumerate(pairs, start=1):
+            self._progress(STAGE_LINK, number - 1, len(pairs))
             size = self._size_of(keeper, extra)
             if size is None or not self._unchanged(keeper, size) or not self._unchanged(extra, size):
                 self.errors.append((extra, "changed since the search; skipped"))
@@ -360,7 +386,8 @@ class DuplicateFinder:
                 self.errors.append((extra, str(e)))
                 print(f"Could not link '{extra}': {e}")
         label = "DRY RUN: would link" if dry_run else "Linked"
-        print(f"\n{label} {len(linked)} duplicate(s) (nothing was deleted)")
+        self._progress(STAGE_LINK, len(pairs), len(pairs))
+        self._say(f"\n{label} {len(linked)} duplicate(s) (nothing was deleted)")
         return linked
 
     def _size_of(self, *paths):
@@ -380,7 +407,7 @@ class DuplicateFinder:
         """Undo the most recent move_duplicates() (see MediaGatherer.undo_last_move)."""
         result = undo_moves(journal, root_folder=self.root_folder, journal_dir=self.journal_dir, dry_run=dry_run)
         verb = "Would restore" if dry_run else "Restored"
-        print(f"{verb} {len(result['restored'])} file(s) from {result['journal']}")
+        self._say(f"{verb} {len(result['restored'])} file(s) from {result['journal']}")
         for item in result["skipped"]:
-            print(f"\tSkipped {item['source']}: {item['reason']}")
+            self._say(f"\tSkipped {item['source']}: {item['reason']}")
         return result
