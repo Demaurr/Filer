@@ -1,6 +1,22 @@
 # Changes
 All the Noteable changes will be stated here.
 
+## Version 1.6.0 - Unreleased
+
+### Added
+- **Command-line interface:** `filer` command (also `python -m Filing`) with `stats`, `move`, `undo` and `dupes`. Supports `--dry-run`, `--organize-by`, filters, `--json` output, `--quiet` / `--no-progress`, and asks for confirmation before changing files (`--yes` to skip; without a terminal it refuses instead of guessing). Exit codes: 0 ok, 1 error or partly done, 2 bad usage, 130 interrupted.
+- **Progress reporting:** pass `progress=function(stage, done, total)` to `FileStatsCollector`, `MediaGatherer`, `Gatherer` and `DuplicateFinder` to follow scanning, planning, moving, hashing and linking. Stage names are constants in `Filing.progress`; `ConsoleProgress` is a ready-made terminal display (stderr) and `ProgressReporter` throttles and shifts counts. A callback that raises cancels the operation (the undo journal is still saved).
+- **`verbose=False`** on the same classes silences informational messages (errors and explicit reports such as `print_summary_stats` still print).
+- `generate_file_stats_html(confirm=False)` skips the "large report" question, so scripts never block on `input()`.
+- `Filing.__version__`; `setup.py` reads the version from it and registers the `filer` command.
+
+### Fixed
+- Scanning many folders in parallel failed silently (no files found) when the gatherer held something a worker process cannot receive, such as a function passed as `organize_by`. Workers now only receive plain data.
+- `DuplicateFinder.clear_cache()` now also deletes the cache file when caching is switched off for the run.
+
+### Changed
+- Removed the deprecated license classifier (the `license="MIT"` field stays).
+
 ## Version 1.5.0 - Unreleased
 
 ### Added

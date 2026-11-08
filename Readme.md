@@ -11,6 +11,7 @@ Filer is a Python package for scanning folders, reporting on the files in them, 
 - **Dry run:** preview exactly where every file would go before anything is touched.
 - **Undo:** every move is recorded in a JSON journal, and the last run can be reversed without overwriting anything.
 - **Organise by rule:** sort files into subfolders by type, date, size, extension, a pattern such as `{type}/{year}/{month}`, or your own function.
+- **Command line and progress:** a `filer` command for everything below, plus progress callbacks and a quiet mode for the Python API.
 - **Duplicate finder:** find identical files quickly (by size, then partial hash, then full hash), then report them, move the extra copies aside (undoable) or replace them with hard links. Nothing is ever deleted. Hashes are remembered between runs, so repeat scans only read new or changed files.
 
 ## Classes
@@ -23,10 +24,11 @@ Filer is a Python package for scanning folders, reporting on the files in them, 
 | `DuplicateFinder` | Find and handle duplicate files. |
 | `FileFilter`, `Organizer` | The filter and organise rules behind the options above. |
 | `MoveJournal`, `undo_moves` | The undo journal. |
+| `ConsoleProgress`, `ProgressReporter` | Progress display and callback helper. |
 
 ## Installation
 
-Install from the folder that contains `setup.py` (see [documentation](Filer/documentation.md) for details):
+Install from the folder that contains `setup.py` (see [documentation](Filer/documentation.md) for details). This also installs the `filer` command:
 
 ```
 cd Filer
@@ -34,6 +36,18 @@ pip install --upgrade .
 ```
 
 ## Usage
+
+### From the command line
+
+```
+filer stats D:\Photos --all-files --csv report.csv       # statistics and reports
+filer move D:\Downloads --organize-by type --dry-run     # preview
+filer move D:\Downloads --organize-by type               # asks before moving; add --yes to skip the question
+filer undo D:\Downloads                                  # changed your mind
+filer dupes D:\Photos --move                             # extra copies go to D:\Photos\Duplicates
+```
+
+Every command shows a progress bar, can print JSON (`--json`), and never changes files without asking (or `--yes`). See the [documentation](Filer/documentation.md) for all options.
 
 ### Gather files, with a preview and an undo
 
