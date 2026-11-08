@@ -3,7 +3,9 @@ import shutil
 import csv
 from datetime import datetime
 from Filing.filestatser import FileStatsCollector
-import re
+from Filing.journal import MoveJournal, JOURNAL_DIR_NAME, undo_moves
+from Filing.mover import plan_moves, execute_moves, unique_destination, remove_number_suffix
+from Filing.organizer import make_organizer
 
 class MediaGatherer(FileStatsCollector):
     """
@@ -48,27 +50,45 @@ class MediaGatherer(FileStatsCollector):
             root_folder, 
             destination_folder=None, 
             skip_folders=None, 
-            media_extensions=['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif'], 
-            all_files=False
+            media_extensions=['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif'],
+            all_files=False,
+            organize_by=None,
+            journal=True,
+            journal_dir=None,
+            **filter_options
         ):
-        if skip_folders is None:
-            skip_folders = []
+        # organize_by: preset ('type', 'date', 'size', 'extension'), a pattern like '{type}/{year}'
+        #     (see Filing.organizer), an Organizer, or a function(stats dict) -> relative folder.
+        # journal / journal_dir: keep a JSON log of every move so it can be undone with
+        #     undo_last_move(). Default folder: '<root_folder>/.filer_journal'.
+        # filter_options: min_size, max_size, modified_after, modified_before, name_glob, name_regex
+        #     (see FileStatsCollector).
+        skip_folders = list(skip_folders) if skip_folders else []
         if destination_folder is None:
             destination_folder = os.path.join(root_folder, 'media')
         skip_folders.append(destination_folder)
-        # print(skip_folders)
+        skip_folders.append(JOURNAL_DIR_NAME)
+        if journal_dir:
+            skip_folders.append(journal_dir)
         self.root_folder = root_folder
         self.media_extensions = media_extensions
+        self.organizer = make_organizer(organize_by)
+        self.journal_enabled = journal
+        self.journal_dir = journal_dir
+        self._journal = None
+        self.last_journal_path = None
+        self.failed_moves = []
         super().__init__(
-            root_folder, 
-            media_extensions=media_extensions, 
-            skip_folders=skip_folders, 
-            all_files=all_files)
+            root_folder,
+            media_extensions=media_extensions,
+            skip_folders=skip_folders,
+            all_files=all_files,
+            **filter_options)
         self.moved_files = {}
         self.file_sources = []
         self.file_stats_dict = []
         self.dest_folder = destination_folder
-        
+
 
     def create_media_folder(self, destination_folder):
         """
@@ -85,62 +105,109 @@ class MediaGatherer(FileStatsCollector):
         files_to_move = [stat for stat in self.file_stats if move_all_files or self.is_media_file(stat['File Name'])]
         return files_to_move
 
-    def move_files_to_destination(self, files_to_move, destination_folder, move_all_files=False):
+    def _destination_path(self, file_stat, destination_folder):
+        """Where a file goes: below destination_folder, in the subfolder chosen by organize_by (if any)."""
+        if self.organizer is not None:
+            return self.organizer.destination(file_stat, destination_folder)
+        return os.path.join(destination_folder, file_stat['File Name'])
+
+    def preview_moves(self, files_to_move=None, destination_folder=None, move_all_files=False):
+        """
+        Dry run: work out where every file would go, without touching anything.
+        Name conflicts (also between files in this plan) are already resolved in the result.
+
+        Returns:
+            dict: {source_path: destination_path}
+        """
+        if destination_folder is None:
+            destination_folder = self.dest_folder
+        if files_to_move is None:
+            files_to_move = self.get_files_to_move(move_all_files or self.all_files)
+        pairs = [
+            (os.path.join(stat['Source Folder'], stat['File Name']), self._destination_path(stat, destination_folder))
+            for stat in files_to_move
+        ]
+        return dict(plan_moves(pairs))
+
+    def move_files_to_destination(self, files_to_move, destination_folder, move_all_files=False, dry_run=False):
         """
         Move media files to the specified destination folder.
 
         Parameters:
+            files_to_move (list): File stats dicts to move (see get_files_to_move).
             destination_folder (str): The destination folder path.
             move_all_files (bool): Flag indicating whether to move all files or only media files.
+            dry_run (bool): Only return the planned moves {source: destination}; move nothing.
         """
         try:
-            self.create_media_folder(destination_folder)
-            # files_to_move = self.get_files_to_move(move_all_files=move_all_files)
             if not files_to_move:
                 print("\nNO FILEs TO MOVE. ^<>^")
                 return -1
 
-            for file_stat in files_to_move:
-                source_path = os.path.join(file_stat['Source Folder'], file_stat['File Name'])
-                destination_path = os.path.join(destination_folder, file_stat['File Name'])
+            if dry_run:
+                return self.preview_moves(files_to_move, destination_folder)
 
-                if source_path == destination_path:
-                    continue
+            pairs = [
+                (os.path.join(stat['Source Folder'], stat['File Name']), self._destination_path(stat, destination_folder))
+                for stat in files_to_move
+            ]
+            plan = plan_moves(pairs)
+            self.dest_folder = destination_folder
+            moved, failed = execute_moves(plan, journal=self._get_journal())
+            # storing source path and destination path of the moved files in a dict {source_path: destination}
+            self.moved_files.update(moved)
+            self.failed_moves.extend(failed)
 
-                # print("The Suffix remover: ",self.remove_number_suffix(os.path.splitext(destination_path)[0]))
-                # if os.path.exists(destination_path):
-                #     destination_path = self.rename_if_exists(destination_path)
-                destination_path = self.handle_file_conflict(destination_path)
-
-                shutil.move(source_path, destination_path)
-
-                # storing source path and destination path of the moved files in a dict {source_path: destination}
-                self.moved_files[source_path] = destination_path
-
-                print(f"\tMoved: {file_stat['File Name']}")
-
-            print(f"Total Files Moved: {len(files_to_move)}")
+            print(f"Total Files Moved: {len(moved)}")
         except Exception as e:
             print(f"Error moving files to destination folder: {e}")
 
-    def handle_file_conflict(self, destination_path):
+    def _get_journal(self):
+        """The journal of the current gather run (created on first use), or None if journaling is off."""
+        if not self.journal_enabled:
+            return None
+        if self._journal is None:
+            self._journal = MoveJournal(self.root_folder, self.journal_dir, operation="move")
+        return self._journal
+
+    def undo_last_move(self, journal=None, dry_run=False):
+        """
+        Undo the most recent gather (or the given journal file): move the files back to where they came from.
+        Files are never overwritten; entries that cannot be restored are reported and left in the journal.
+
+        Parameters:
+            journal (str): Path of a journal JSON file. Default: newest journal not yet undone.
+            dry_run (bool): Only report what would be restored.
+
+        Returns:
+            dict: {"journal": path, "restored": {moved_path: original_path}, "skipped": [...], "dry_run": bool}
+        """
+        result = undo_moves(journal, root_folder=self.root_folder, journal_dir=self.journal_dir, dry_run=dry_run)
+        verb = "Would restore" if dry_run else "Restored"
+        print(f"{verb} {len(result['restored'])} file(s) from {result['journal']}")
+        for item in result["skipped"]:
+            print(f"\tSkipped {item['source']}: {item['reason']}")
+        if not dry_run:
+            for original in result["restored"].values():
+                self.moved_files.pop(original, None)
+        return result
+
+    def handle_file_conflict(self, destination_path, reserved=None):
         """
         Checks if a file exists at the destination and renames it if necessary.
-        
+
         Parameters:
-            source_path (str): The source file path.
             destination_path (str): The destination file path.
+            reserved (set): Optional planned-but-not-yet-existing paths to avoid as well.
 
         Returns:
             str: The new destination file path (with a unique name if needed).
         """
-        if os.path.exists(destination_path):
-            return self.rename_if_exists(destination_path)
-        return destination_path
-    
-    def rename_if_exists(self, filename):
+        return unique_destination(destination_path, reserved)
+
+    def rename_if_exists(self, filename, reserved=None):
         """
-        Rename a filename if it already exists in the destination folder.
+        Rename a filename if it already exists in the destination folder ('name(1).ext', 'name(2).ext'...).
 
         Parameters:
             filename (str): The filename to check and rename if necessary.
@@ -148,17 +215,7 @@ class MediaGatherer(FileStatsCollector):
         Returns:
             str: The new filename after renaming.
         """
-        
-        base_name, extension = os.path.splitext(filename)
-        base_name = self.remove_number_suffix(base_name)
-        counter = 1
-        new_filename = filename
-        
-        while os.path.exists(new_filename):
-            new_filename = f"{base_name}({counter}){extension}"
-            counter += 1
-
-        return new_filename
+        return unique_destination(filename, reserved)
 
     @staticmethod
     def remove_number_suffix(basename):
@@ -171,17 +228,15 @@ class MediaGatherer(FileStatsCollector):
         Returns:
             str: The basename without the "(number)" suffix.
         """
-        match = re.match(r'^(.*?)\(\d+\)$', basename)
-        if match:
-            return match.group(1)
-        return basename
+        return remove_number_suffix(basename)
 
     def gather_media(
-            self, 
-            destination_folder=None, 
+            self,
+            destination_folder=None,
             move_all=False,
             batch_size=15,
-            time_delay=0.1
+            time_delay=0.1,
+            dry_run=False
         ):
         """
         Perform the media gathering process with options for destination folder and moving all files.
@@ -189,6 +244,12 @@ class MediaGatherer(FileStatsCollector):
         Parameters:
             destination_folder (str): The destination folder path (default is 'media' subfolder).
             move_all (bool): Flag indicating whether to move all files or only media files.
+            batch_size (int): Files per batch when moving many files.
+            time_delay (float): Seconds to wait between batches.
+            dry_run (bool): Move nothing; return the planned moves {source: destination}.
+
+        Returns:
+            dict: With dry_run, the planned moves; otherwise the moves done so far {source: destination}.
         """
         try:
             if destination_folder is None:
@@ -200,16 +261,29 @@ class MediaGatherer(FileStatsCollector):
 
             files_to_move = self.get_files_to_move(move_all)
 
+            if dry_run:
+                plan = self.preview_moves(files_to_move, destination_folder)
+                print(f"\nDRY RUN: {len(plan)} file(s) would be moved to {destination_folder} (nothing was changed)")
+                for source, destination in list(plan.items())[:20]:
+                    print(f"\t{source}  ->  {destination}")
+                if len(plan) > 20:
+                    print(f"\t... and {len(plan) - 20} more")
+                return plan
+
+            self._journal = None  # every run gets its own journal
             if len(self.file_stats) > 100:
                 self._batch_move_files(files_to_move, destination_folder, batch_size=batch_size, delay=time_delay)
             else:
                 self.move_files_to_destination(files_to_move, destination_folder, move_all)
+            if self._journal is not None and self._journal.path:
+                self.last_journal_path = self._journal.path
+                print(f"Journal saved: {self.last_journal_path} (undo with undo_last_move())")
             self.show_moved_stats()
+            return dict(self.moved_files)
         except Exception as e:
             print(f"Error gathering media: {e}")
 
     def _batch_move_files(self, files_to_move, destination_folder, batch_size=100, delay=0.1):
-        from time import sleep
         """
         Move files in batches with a delay between each batch to avoid system overload.
         Parameters:
@@ -218,13 +292,14 @@ class MediaGatherer(FileStatsCollector):
             batch_size (int): number of files to move per batch before delay
             delay (int): number of seconds to delay the moving of files to remove load on pc
         """
+        from time import sleep
         try:
             for i in range(0, len(files_to_move), batch_size):
                 batch = files_to_move[i:i + batch_size]
-                # for file_stat in batch:
                 self.move_files_to_destination(destination_folder=destination_folder, files_to_move=batch)
                 print(f"Moved batch {i // batch_size + 1} of {len(files_to_move) // batch_size + 1}")
-                sleep(delay)
+                if delay:
+                    sleep(delay)
         except Exception as e:
             print(f"An Exception Occurred while Batch Moving {e}")
 
@@ -308,8 +383,12 @@ class Gatherer(MediaGatherer):
             root_folder, 
             destination_folder=None, 
             extensions=None, 
-            skip_folders=None, 
-            all_files=False
+            skip_folders=None,
+            all_files=False,
+            organize_by=None,
+            journal=True,
+            journal_dir=None,
+            **filter_options
         ):
         if extensions is None:
             extensions = []
@@ -326,8 +405,12 @@ class Gatherer(MediaGatherer):
             root_folder, 
             destination_folder=self.destination_folder, 
             media_extensions=self.extensions, 
-            skip_folders=skip_folders, 
-            all_files=all_files
+            skip_folders=skip_folders,
+            all_files=all_files,
+            organize_by=organize_by,
+            journal=journal,
+            journal_dir=journal_dir,
+            **filter_options
             )
         self.extensions = []
 
@@ -348,21 +431,24 @@ class Gatherer(MediaGatherer):
             destination_folder=None, 
             all_files=False,
             batch_size=100,
-            time_delay=0.5
+            time_delay=0.5,
+            dry_run=False
             ):
         """
         Perform the media gathering process with custom extensions.
 
         Parameters:
             destination_folder (str): The destination folder path (default is 'Extracted Files' subfolder).
-            move_all (bool): Flag indicating whether to move all files or only particular extension files.
+            all_files (bool): Flag indicating whether to move all files or only particular extension files.
+            dry_run (bool): Move nothing; return the planned moves {source: destination}.
         """
         try:
-            super().gather_media(
-                destination_folder=destination_folder, 
+            return super().gather_media(
+                destination_folder=destination_folder,
                 move_all=all_files,
                 batch_size=batch_size,
-                time_delay=time_delay
+                time_delay=time_delay,
+                dry_run=dry_run
                 )
         except Exception as e:
             print(f"Error gathering media with custom extensions: {e}")
