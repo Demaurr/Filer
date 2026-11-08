@@ -1,6 +1,25 @@
 # Changes
 All the Noteable changes will be stated here.
 
+## Version 1.4.0 - Unreleased
+
+### Added
+- **Dry run:** `gather_media(dry_run=True)`, `gather_files(dry_run=True)`, `preview_moves()` and `move_files_to_destination(..., dry_run=True)` return the planned moves `{source: destination}` and touch nothing. Name conflicts, also between planned files, are already resolved in the plan.
+- **Undo:** every move is recorded in a JSON journal (`<root>/.filer_journal/`, or `journal_dir`). `undo_last_move()` moves the files back without overwriting anything, removes folders the run created if they are empty, and can be repeated for entries that were skipped. Turn journaling off with `journal=False`. Also available as `Filing.undo_moves()`.
+- **Duplicate finder** (`Filing.DuplicateFinder`): stage-wise matching (size, then hash of first and last 64 KB, then whole-file hash only when needed) with threaded hashing. Report (`print_summary`, `generate_duplicates_csv`), `move_duplicates()` (undoable) or `link_duplicates()` (hard links). Choose the copy to keep with `keep='oldest'|'newest'|'first'|'shortest_path'`. Nothing is ever deleted.
+- **Organise by rule:** `organize_by` on `MediaGatherer` and `Gatherer` sorts files into subfolders by `'type'`, `'date'`, `'size'`, `'extension'`, a pattern such as `'{type}/{year}/{month}'`, or a function (`Filing.Organizer`).
+- **Filters** on `FileStatsCollector`, `MediaGatherer`, `Gatherer` and `DuplicateFinder`: `min_size`, `max_size`, `modified_after`, `modified_before`, `name_glob`, `name_regex` (`Filing.FileFilter`). Applied during the scan; name filters need no stat call.
+- New modules: `filters.py`, `journal.py`, `mover.py`, `organizer.py`, `duplicates.py`.
+- `MediaGatherer.failed_moves` lists files that could not be moved.
+
+### Changed
+- Python 3.9 or newer is now required (was 3.6).
+- Moving now continues after a file fails (the failure is reported and kept in `failed_moves`) instead of stopping the whole batch.
+- `gather_media()` returns the moved files `{source: destination}` (it returned `None`).
+- `MediaGatherer` no longer modifies the `skip_folders` list you pass in.
+- Moving logic was moved into `mover.py`; `handle_file_conflict`, `rename_if_exists` and `remove_number_suffix` still exist and behave the same.
+- "Total Files Moved" now counts the files actually moved.
+
 ## Version 1.3.0 - 2026-11-09
 
 ### Changed

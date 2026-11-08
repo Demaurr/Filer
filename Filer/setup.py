@@ -5,7 +5,7 @@ with open("documentation.md", "r", encoding="utf-8") as fh:
 
 setup(
     name='Filer',
-    version='1.3.0',
+    version='1.4.0',
     packages=["Filing"],
     author='Demaurr',
     author_email='demaurr@example.com',
@@ -16,9 +16,13 @@ setup(
     license="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
     install_requires=[],
-    python_requires='>=3.6',
+    python_requires='>=3.9',
 )

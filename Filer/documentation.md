@@ -79,6 +79,56 @@ if __name__ == "__main__":
 
 This script prompts the user to enter the root path to gather file information, whether to gather statistics for all files, and the filename and folder path to save the statistics files. It then utilizes the Filing package to gather and analyze file statistics, generate HTML and CSV reports, and save them to the specified location.
 
+**Requirements:** Python 3.9 or newer, no third-party packages.
+
+**Previewing and undoing moves:**
+
+```python
+from Filing import MediaGatherer
+
+gatherer = MediaGatherer(r"D:\Downloads")
+plan = gatherer.gather_media(dry_run=True)   # {source: destination}, nothing is touched
+gatherer.gather_media()                      # does the move and writes a journal
+gatherer.undo_last_move()                    # moves everything back
+```
+
+Every real move is logged in `<root>/.filer_journal/*.json` (change the location with `journal_dir=`, turn it off with `journal=False`). Undo never overwrites a file: if the original location is occupied again, or the moved file is gone, that entry is skipped and reported, and stays in the journal so you can run `undo_last_move()` again after fixing it. Folders created by the run are removed if they are empty. `undo_last_move(dry_run=True)` shows what would be restored.
+
+**Organising into subfolders:**
+
+```python
+MediaGatherer(root, all_files=True, organize_by="type")                        # Images/, Videos/, Documents/ ...
+MediaGatherer(root, all_files=True, organize_by="date")                        # 2026/11/
+MediaGatherer(root, all_files=True, organize_by="{type}/{year}/{month}")       # Images/2026/11/
+MediaGatherer(root, all_files=True, organize_by=lambda stat: "Big" if stat["File Size (Bytes)"] > 10**8 else "Small")
+```
+
+Presets: `type`, `date`, `size`, `extension`. Pattern fields: `{type}` (Images, Videos, Audio, Documents, Archives, Code, Other), `{extname}` (`jpg`), `{ext}` (`.jpg`), `{year}` `{month}` `{day}` (modification date), `{size}` (Tiny, Small, Medium, Large, Huge), `{source}` (name of the original folder), `{name}`, `{filename}`. A pattern describes the folder and the file keeps its name; if the last part contains `{name}`, `{filename}` or `{ext}` it describes the whole path (`{type}/{year}/{name}` also works and keeps the extension). Combine it with `dry_run=True` to see the result first.
+
+**Filtering while scanning:**
+
+```python
+FileStatsCollector(root, all_files=True, min_size="10MB", modified_after="2026-01-01", name_glob=["*.mp4", "*.mkv"])
+```
+
+`min_size` / `max_size` (inclusive; bytes or `'10KB'`, `'1.5 MB'`), `modified_after` (inclusive) / `modified_before` (exclusive) (datetime, date, timestamp or ISO string), `name_glob` (case-insensitive, one or a list), `name_regex` (one or a list). All given filters must match. Filtered-out files are never stored, so they do not appear in reports or get moved. The same options work on `MediaGatherer`, `Gatherer` and `DuplicateFinder`.
+
+**Finding duplicates:**
+
+```python
+from Filing import DuplicateFinder
+
+finder = DuplicateFinder(r"D:\Photos", skip_folders=[".git"])
+finder.find()
+finder.print_summary()
+finder.generate_duplicates_csv()
+finder.move_duplicates(dry_run=True)   # preview
+finder.move_duplicates()               # extra copies go to <root>/Duplicates (undo with finder.undo_last_move())
+finder.link_duplicates()               # or: replace extra copies with hard links (cannot be undone)
+```
+
+Files are compared in stages (same size, then a hash of the first and last 64 KB, then a hash of the whole file only if still needed), so most files are ruled out without being read in full. `keep='oldest'` (default), `'newest'`, `'first'` or `'shortest_path'` chooses the copy that stays. Empty files are ignored. Nothing is ever deleted. `link_duplicates()` needs files on the same drive and skips copies that changed after the search.
+
 **Skipping folders:**
 
 `skip_folders` entries are matched exactly (case-insensitively on Windows):
@@ -98,7 +148,7 @@ Skipped folders are never scanned, so skipping large folders such as `node_modul
 From the repository root:
 
 ```
-PYTHONPATH=Filer python -m unittest Filer.tests.tests_filestatser_extra Filer.tests.tests_gatherer Filer.tests.tests_filestatser
+PYTHONPATH=Filer python -m unittest discover -s Filer/tests -p "tests_*.py"
 ```
 
 (On PowerShell, set `$env:PYTHONPATH = "Filer"` first.) `tests_filestatser.py` uses relative paths, so it must be run from the repository root.
