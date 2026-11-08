@@ -1,49 +1,89 @@
 # Filer
 
-Filer is a Python package designed to simplify the process of gathering statistics on media files within a specified root folder. It provides a range of features for collecting file statistics, moving files to a destination folder, generating reports, and more.
+Filer is a Python package for scanning folders, reporting on the files in them, and moving and organising those files safely. Moves can be previewed first and undone afterwards. It has no third-party dependencies and requires **Python 3.9 or newer**.
 
 ## Features
 
-### 1. FileStatsCollector Class
+- **Fast scanning:** folders are scanned in parallel, with skipped folders never entered.
+- **Statistics and reports:** file sizes, types, dates, size and folder distributions, as CSV or HTML. A difference report compares the current files with an earlier CSV and tags files as New, Modified, Same or Deleted.
+- **Filters:** keep only files within a size range, modified date range, or matching name (glob or regex), applied while scanning.
+- **Moving files:** gather media files (or files of any extension) from a folder tree into one destination, with automatic renaming on name clashes and batched moves to limit load.
+- **Dry run:** preview exactly where every file would go before anything is touched.
+- **Undo:** every move is recorded in a JSON journal, and the last run can be reversed without overwriting anything.
+- **Organise by rule:** sort files into subfolders by type, date, size, extension, a pattern such as `{type}/{year}/{month}`, or your own function.
+- **Duplicate finder:** find identical files quickly (by size, then partial hash, then full hash), then report them, move the extra copies aside (undoable) or replace them with hard links. Nothing is ever deleted.
 
-The `FileStatsCollector` class is the core component of Filer, responsible for gathering statistics on media files within a specified root folder. It offers the following functionality:
+## Classes
 
-- **File Statistics Collection:** Scan a root folder for files and collect detailed statistics such as file size, type, creation date, and modification date.
-- **File Filtering:** Filter files based on specified criteria, such as media file extensions.
-- **File Size Distribution:** Visualize the distribution of file sizes across various ranges.
-- **Summary Statistics:** Generate summary statistics including total files, total size, average size, most common file type, etc.
-- **Report Generation:** Create CSV and HTML reports containing detailed statistics of media files for easy analysis.
-- **Sorting and Filtering:** Sort and filter file statistics based on various criteria.
-- **Customizable:** Easily adaptable and extendable for specific use cases.
-
-### 2. MediaGatherer Class
-
-The `MediaGatherer` class extends the functionality of `FileStatsCollector` by providing utilities for moving media files to a destination folder. It includes the following features:
-
-- **Media File Moving:** Move media files under a root directory to a given destination folder, with options to skip specified folders and handle duplicate filenames.
-- **Report Generation:** Generate CSV and HTML reports containing detailed statistics of moved media files for analysis.
-- **Customizable:** Customize folder skipping and file moving behavior as per requirements.
+| Class | Purpose |
+|---|---|
+| `FileStatsCollector` | Scan a folder, collect statistics, write CSV and HTML reports, compare scans. |
+| `MediaGatherer` | `FileStatsCollector` plus moving media files to a destination, with dry run, undo and organising. |
+| `Gatherer` | Like `MediaGatherer`, but for any file extensions you choose. |
+| `DuplicateFinder` | Find and handle duplicate files. |
+| `FileFilter`, `Organizer` | The filter and organise rules behind the options above. |
+| `MoveJournal`, `undo_moves` | The undo journal. |
 
 ## Installation
 
-You can install Filer using the method stated in [documentation](Filer/documentation.md) of the project.
+Install from the folder that contains `setup.py` (see [documentation](Filer/documentation.md) for details):
+
+```
+cd Filer
+pip install --upgrade .
+```
 
 ## Usage
 
-Here's a simple example demonstrating how to use Filer:
+### Gather files, with a preview and an undo
 
 ```python
-from Filing import gatherer as gf
+from Filing import MediaGatherer
 
-# Initialize MediaGatherer with the root directory
-root_directory = input("Enter the root directory: ")
-media_gatherer = gf.MediaGatherer(root_directory)
+if __name__ == "__main__":
+    gatherer = MediaGatherer(r"D:\Downloads")
 
-# Gather media files and generate statistics
-media_gatherer.gather_media()
-media_gatherer.generate_stats_csv()
-media_gatherer.show_stats()
+    gatherer.gather_media(dry_run=True)   # shows what would move; nothing is touched
+    gatherer.gather_media()               # moves the media files into D:\Downloads\media
+    gatherer.undo_last_move()             # changes your mind: everything goes back
 ```
+
+Keep scripts under an `if __name__ == "__main__":` guard. Large folders are scanned with multiple processes, which Windows requires.
+
+### Organise into subfolders
+
+```python
+from Filing import Gatherer
+
+Gatherer(root, all_files=True, organize_by="{type}/{year}/{month}").gather_files()
+# -> media files end up in Extracted Files/Images/2026/11/, Documents/2026/11/ ...
+```
+
+### Statistics and reports
+
+```python
+from Filing import FileStatsCollector
+
+stats = FileStatsCollector(root, all_files=True, skip_folders=[".git", "node_modules"],
+                           min_size="1MB", modified_after="2026-01-01")
+stats.print_summary_stats()
+stats.generate_file_stats_csv()
+stats.generate_summary_html()
+```
+
+### Find duplicates
+
+```python
+from Filing import DuplicateFinder
+
+finder = DuplicateFinder(r"D:\Photos")
+finder.find()
+finder.print_summary()
+finder.move_duplicates(dry_run=True)   # preview
+finder.move_duplicates()               # extra copies go to D:\Photos\Duplicates (undoable)
+```
+
+More options (filters, organise patterns, conflict handling, skip rules, running the tests) are in the [documentation](Filer/documentation.md). Changes between versions are listed in [Changes.md](Filer/Changes.md).
 
 ## Contributing
 
@@ -51,4 +91,4 @@ Contributions are welcome! If you encounter any issues or have suggestions for i
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
