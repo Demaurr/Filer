@@ -10,6 +10,7 @@ from datetime import datetime
 from collections import Counter
 from multiprocessing import Pool
 import time
+from Filing.filters import FileFilter
 
 class FileStatsCollector:
     """
@@ -19,7 +20,10 @@ class FileStatsCollector:
         root_folder (str): The root folder to scan for media files.
         media_extensions (list): List of allowed media file extensions.
         all_files (bool): Flag indicating whether to gather statistics for all files or only media files.
-        skip_folders (list): List of folders to skip while gathering statistics.
+        skip_folders (list): Folder names (or paths) to skip while gathering statistics.
+        min_size, max_size: Only keep files within these sizes (bytes or strings like '10MB').
+        modified_after, modified_before: Only keep files modified in this time range (inclusive/exclusive).
+        name_glob, name_regex: Only keep files whose name matches (a pattern or a list of patterns).
         total_files (int): Total number of files found in the root folder.
 
     Methods:
@@ -59,8 +63,30 @@ class FileStatsCollector:
     # Below this many folders, scanning serially is faster than starting a process pool
     _PARALLEL_MIN_FOLDERS = 32
 
-    def __init__(self, root_folder, media_extensions: list = None, all_files=False, skip_folders: list=None):
-        # self.media_extensions = media_extensions
+    def __init__(
+            self,
+            root_folder,
+            media_extensions: list = None,
+            all_files=False,
+            skip_folders: list=None,
+            min_size=None,
+            max_size=None,
+            modified_after=None,
+            modified_before=None,
+            name_glob=None,
+            name_regex=None
+        ):
+        # Filters (see Filing.filters.FileFilter) are applied during the scan, so files that do not
+        # match are never stored. Sizes accept bytes or strings like '10MB'; times accept
+        # datetime/date, a timestamp or an ISO string like '2026-11-09'.
+        self.file_filter = FileFilter(
+            min_size=min_size,
+            max_size=max_size,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            name_glob=name_glob,
+            name_regex=name_regex,
+        )
         if media_extensions is None:
             media_extensions = ['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif']
         if skip_folders is None:
@@ -218,7 +244,7 @@ h2 {{
             size /= 1024.0
         return "{:.2f} {}".format(size, unit)
 
-    def process_files(self, foldername, all_files, media_extensions, format_size):
+    def process_files(self, foldername, all_files, media_extensions, format_size, file_filter=None):
         """
         Process files within a folder and collect file statistics.
 
@@ -233,6 +259,10 @@ h2 {{
         """
         folder_stats = []
         extensions = tuple(ext.lower() for ext in media_extensions)
+        if file_filter is None:
+            file_filter = getattr(self, 'file_filter', None)
+        if file_filter is not None and not file_filter.active:
+            file_filter = None
         try:
             with os.scandir(foldername) as entries:
                 for entry in entries:
@@ -240,7 +270,11 @@ h2 {{
                         filename = entry.name
                         lowered = filename.lower()
                         if all_files or lowered.endswith(extensions):
+                            if file_filter is not None and not file_filter.name_ok(filename):
+                                continue  # rejected by name: no stat call needed
                             stat_info = entry.stat()
+                            if file_filter is not None and not file_filter.stat_ok(stat_info.st_size, stat_info.st_mtime):
+                                continue
                             folder_stats.append({
                                 'File Name': filename,
                                 'File Type': os.path.splitext(lowered)[1],
