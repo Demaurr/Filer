@@ -95,10 +95,11 @@ class TestGeneral(Base):
         self.assertIn("filer: error:", err)
         self.assertNotIn("Traceback", err)
 
-    def test_package_version_matches_setup(self):
-        setup_py = os.path.join(PACKAGE_PARENT, "setup.py")
-        result = subprocess.run([sys.executable, setup_py, "--version"], capture_output=True, text=True, cwd=PACKAGE_PARENT)
-        self.assertEqual(result.stdout.strip().splitlines()[-1], __version__)
+    def test_package_version_has_one_source(self):
+        with open(os.path.join(PACKAGE_PARENT, "pyproject.toml"), encoding="utf-8") as f:
+            self.assertIn('version = { attr = "Filing.__version__" }', f.read())
+        code, out, _ = run("--version")
+        self.assertEqual(out.strip(), f"filer {__version__}")
 
 
 class TestStats(Base):

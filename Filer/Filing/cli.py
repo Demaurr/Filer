@@ -17,10 +17,12 @@ import os
 import sys
 
 from Filing import __version__
+from Filing.cleanup import EmptyFolderFinder, JunkFinder, JUNK_KINDS, JUNK_PATTERNS
 from Filing.duplicates import DuplicateFinder, KEEP_CHOICES
 from Filing.filestatser import FileStatsCollector
 from Filing.gatherer import MediaGatherer
 from Filing.journal import JOURNAL_DIR_NAME, find_latest_journal, list_journals, load_journal, undo_moves
+from Filing import paths
 from Filing.progress import ConsoleProgress
 
 PLAN_LINES_SHOWN = 20
@@ -42,6 +44,25 @@ def _common_parent():
     return parent
 
 
+def _add_ignore_options(group):
+    group.add_argument("--exclude", action="append", metavar="PATTERN",
+                       help="leave out files/folders matching this .gitignore-style pattern, e.g. '*.tmp' or 'build/' "
+                            "(repeat for more; matching folders are never entered)")
+    group.add_argument("--ignore-file", metavar="FILE",
+                       help="read exclude patterns from FILE instead of FOLDER/.filerignore")
+    group.add_argument("--no-ignore-file", action="store_true", help="do not read FOLDER/.filerignore")
+
+
+def _tidy_parent():
+    """Options for commands that look at folders and files without the size/date/name filters."""
+    parent = argparse.ArgumentParser(add_help=False)
+    group = parent.add_argument_group("which folders")
+    group.add_argument("--skip", action="append", metavar="NAME",
+                       help="skip folders with this exact name, or this path (repeat for more)")
+    _add_ignore_options(group)
+    return parent
+
+
 def _scan_parent(files=True):
     parent = argparse.ArgumentParser(add_help=False)
     group = parent.add_argument_group("which files")
@@ -57,6 +78,7 @@ def _scan_parent(files=True):
     group.add_argument("--modified-before", metavar="DATE", help="only files modified before this date")
     group.add_argument("--glob", action="append", metavar="PATTERN", help="only file names matching this pattern, e.g. '*.jpg'")
     group.add_argument("--regex", action="append", metavar="PATTERN", help="only file names matching this regular expression")
+    _add_ignore_options(group)
     return parent
 
 
@@ -69,7 +91,10 @@ def build_parser():
                "  filer move D:\\Downloads --organize-by type --dry-run\n"
                "  filer move D:\\Downloads --organize-by \"{type}/{year}/{month}\" --yes\n"
                "  filer undo D:\\Downloads\n"
-               "  filer dupes D:\\Photos --move --keep oldest",
+               "  filer dupes D:\\Photos --move --keep oldest\n"
+               "  filer empty D:\\Photos --remove --dry-run\n"
+               "  filer junk D:\\Photos --move --dry-run\n"
+               "  filer stats D:\\Photos --exclude \"*.tmp\" --exclude \"build/\"",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"filer {__version__}")
@@ -121,6 +146,9 @@ def build_parser():
     undo.add_argument("--journal-dir", metavar="DIR", help="where the journals are kept")
     undo.add_argument("--list", action="store_true", help="list the journals instead of undoing")
     undo.add_argument("--dry-run", action="store_true", help="show what would be restored; change nothing")
+    undo.add_argument("--allow-folder", metavar="DIR", action="append", default=[],
+                      help="also allow files to be restored from DIR (needed when the move went to a destination "
+                           "outside FOLDER); can be repeated")
     undo.set_defaults(func=cmd_undo)
 
     # ---- dupes
@@ -142,6 +170,40 @@ def build_parser():
     dupes.add_argument("--no-cache", action="store_true", help="do not remember hashes between runs")
     dupes.add_argument("--clear-cache", action="store_true", help="forget remembered hashes first")
     dupes.set_defaults(func=cmd_dupes)
+
+    # ---- empty
+    empty = commands.add_parser("empty", parents=[common, _tidy_parent()], help="find (and remove) empty folders",
+                                description="List folders that contain no files (a folder holding only empty folders "
+                                            "counts). Nothing changes unless you add --remove; no file is ever deleted.")
+    empty.add_argument("folder")
+    empty.add_argument("--remove", action="store_true",
+                       help="remove the empty folders (deepest first); recorded so 'filer undo' can bring them back")
+    empty.add_argument("--dry-run", action="store_true", help="with --remove: show what would be removed; change nothing")
+    empty.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    empty.add_argument("--no-journal", action="store_true", help="do not record the removal (it can then not be undone)")
+    empty.add_argument("--journal-dir", metavar="DIR", help=f"where to keep the undo journal (default: FOLDER/{JOURNAL_DIR_NAME})")
+    empty.set_defaults(func=cmd_empty)
+
+    # ---- junk
+    junk = commands.add_parser("junk", parents=[common, _tidy_parent()], help="find junk and zero-byte files",
+                               description="Find junk files (Thumbs.db, desktop.ini, .DS_Store, temp files ...) and "
+                                           "zero-byte files. Nothing changes unless you add --move; nothing is ever deleted.")
+    junk.add_argument("folder")
+    junk.add_argument("--kinds", nargs="+", choices=JUNK_KINDS, metavar="KIND",
+                      help=f"what to look for: {' '.join(JUNK_KINDS)} (default: both)")
+    junk.add_argument("--pattern", action="append", metavar="GLOB",
+                      help="also treat file names matching this pattern as junk, e.g. '*.bak' (repeat for more)")
+    junk.add_argument("--no-default-patterns", action="store_true",
+                      help=f"do not use the built-in junk names ({', '.join(JUNK_PATTERNS)})")
+    junk.add_argument("--top", type=int, default=20, help="how many files to list (default 20)")
+    junk.add_argument("--csv", nargs="?", const="", metavar="PATH", help="write a CSV report of everything found")
+    junk.add_argument("--move", nargs="?", const="", metavar="DIR",
+                      help="move the files to DIR (default: FOLDER/Junk), keeping their sub-folders; can be undone")
+    junk.add_argument("--dry-run", action="store_true", help="with --move: show what would move; change nothing")
+    junk.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    junk.add_argument("--no-journal", action="store_true", help="do not record the move (it can then not be undone)")
+    junk.add_argument("--journal-dir", metavar="DIR", help=f"where to keep the undo journal (default: FOLDER/{JOURNAL_DIR_NAME})")
+    junk.set_defaults(func=cmd_junk)
     return parser
 
 
@@ -161,8 +223,20 @@ def _split_extensions(values):
     return result
 
 
-def _filter_options(args):
+def _ignore_options(args):
+    """Keyword arguments for the ignore rules (--exclude, --ignore-file, --no-ignore-file)."""
     options = {}
+    if getattr(args, "exclude", None):
+        options["exclude"] = args.exclude
+    if getattr(args, "no_ignore_file", False):
+        options["ignore_file"] = False
+    elif getattr(args, "ignore_file", None):
+        options["ignore_file"] = args.ignore_file
+    return options
+
+
+def _filter_options(args):
+    options = _ignore_options(args)
     for name in ("max_size", "modified_after", "modified_before"):
         value = getattr(args, name, None)
         if value is not None:
@@ -338,7 +412,10 @@ def cmd_move(args, progress):
     else:
         print(f"Moved {len(moved)} file(s) to {destination}")
         if gatherer.last_journal_path:
-            print(f"Undo with: filer undo \"{args.folder}\"" + (f" --journal-dir \"{args.journal_dir}\"" if args.journal_dir else ""))
+            command = f"filer undo \"{args.folder}\"" + (f" --journal-dir \"{args.journal_dir}\"" if args.journal_dir else "")
+            if not paths.is_inside(args.folder, destination, allow_root=True):
+                command += f" --allow-folder \"{destination}\""
+            print(f"Undo with: {command}")
         for source, error in failed:
             print(f"Could not move {source}: {error}", file=sys.stderr)
     return 1 if failed else 0
@@ -381,14 +458,20 @@ def cmd_undo(args, progress):
 
     if not args.journal and find_latest_journal(journal_dir) is None:
         raise CliError(f"nothing to undo (no journal in {journal_dir})")
-    result = undo_moves(args.journal, root_folder=args.folder, journal_dir=args.journal_dir, dry_run=args.dry_run)
+    result = undo_moves(args.journal, root_folder=args.folder, journal_dir=args.journal_dir, dry_run=args.dry_run,
+                        allowed_roots=[args.folder] + list(args.allow_folder))
     if args.json:
         _emit_json(result)
     else:
         verb = "Would restore" if args.dry_run else "Restored"
         print(f"{verb} {len(result['restored'])} file(s)")
+        if result.get("recreated"):
+            print(f"{'Would recreate' if args.dry_run else 'Recreated'} {len(result['recreated'])} empty folder(s)")
         for item in result["skipped"]:
             print(f"Skipped {item['source']}: {item['reason']}", file=sys.stderr)
+        if any(str(item["reason"]).startswith("unsafe path") for item in result["skipped"]):
+            print("Some files are outside the folders undo may touch. If you moved files to another destination "
+                  "yourself, allow it with --allow-folder DIR.", file=sys.stderr)
     return 1 if result["skipped"] else 0
 
 
@@ -458,6 +541,112 @@ def _dupes_action(args, finder, result):
     if moved and finder.journal_enabled:
         _info(args, f"Undo with: filer undo \"{args.folder}\"")
     return 1 if finder.errors and len(moved) < len(plan) else 0
+
+
+def cmd_empty(args, progress):
+    finder = EmptyFolderFinder(
+        args.folder, skip_folders=args.skip, journal=not args.no_journal, journal_dir=args.journal_dir,
+        progress=progress, verbose=False, **_ignore_options(args))
+    folders = finder.find()
+    if progress is not None:
+        progress.close()
+    result = {"folder": os.path.abspath(args.folder), "count": len(folders), "empty_folders": folders}
+
+    if not args.remove:
+        if args.json:
+            _emit_json(result)
+        elif folders:
+            finder.print_summary()
+            _info(args, "Nothing was removed. Add --remove to remove them (add --dry-run to preview).")
+        else:
+            print("No empty folders found.")
+        return 0
+
+    if not folders:
+        if args.json:
+            result["removed"] = []
+            _emit_json(result)
+        else:
+            _info(args, "No empty folders to remove.")
+        return 0
+    if args.dry_run:
+        planned = finder.remove(dry_run=True)
+        result.update({"dry_run": True, "would_remove": planned})
+        if args.json:
+            _emit_json(result)
+        else:
+            print(f"DRY RUN: {len(planned)} empty folder(s) would be removed (nothing was changed)")
+            for folder in planned[:PLAN_LINES_SHOWN]:
+                _info(args, f"  {folder}")
+            if len(planned) > PLAN_LINES_SHOWN:
+                _info(args, f"  ... and {len(planned) - PLAN_LINES_SHOWN} more")
+        return 0
+    if not _confirm(f"Remove {len(folders)} empty folder(s)?", args.yes):
+        _info(args, "Cancelled; nothing was changed.")
+        return 0
+
+    before = len(finder.errors)
+    removed = finder.remove()
+    problems = finder.errors[before:]
+    result.update({"removed": removed, "failed": [{"folder": f, "error": e} for f, e in problems],
+                   "journal": finder.last_journal_path})
+    if args.json:
+        _emit_json(result)
+    else:
+        print(f"Removed {len(removed)} empty folder(s)")
+        if finder.last_journal_path:
+            print(f"Undo with: filer undo \"{args.folder}\"" + (f" --journal-dir \"{args.journal_dir}\"" if args.journal_dir else ""))
+        for folder, error in problems:
+            print(f"Could not remove {folder}: {error}", file=sys.stderr)
+    return 1 if problems else 0
+
+
+def cmd_junk(args, progress):
+    finder = JunkFinder(
+        args.folder, patterns=[] if args.no_default_patterns else None, extra_patterns=args.pattern,
+        kinds=args.kinds or JUNK_KINDS, destination_folder=args.move or None, skip_folders=args.skip,
+        journal=not args.no_journal, journal_dir=args.journal_dir, progress=progress, verbose=False,
+        **_ignore_options(args))
+    finder.find()
+    if progress is not None:
+        progress.close()
+    result = {"folder": os.path.abspath(args.folder), "junk_count": len(finder.junk),
+              "zero_byte_count": len(finder.zero_byte), "total_bytes": finder.total_bytes, "files": finder.to_dicts()}
+    if not args.json:
+        if finder.files:
+            finder.print_summary(top=args.top)
+        else:
+            print("No junk or zero-byte files found.")
+    if args.csv is not None:
+        with _library_output(args):
+            result["csv"] = finder.generate_csv(_optional_path(args.csv))
+
+    exit_code = 0
+    if args.move is not None and finder.files:
+        destination = finder.destination_folder
+        plan = finder.move(dry_run=True)
+        if args.dry_run:
+            result["planned_moves"] = plan
+            _info(args, f"DRY RUN: {len(plan)} file(s) would be moved to {destination} (nothing was changed)")
+            _print_plan(args, plan)
+        elif not _confirm(f"Move {len(plan)} file(s) to {destination}?", args.yes):
+            _info(args, "Cancelled; nothing was changed.")
+        else:
+            moved = finder.move()
+            result["moved"] = moved
+            _info(args, f"Moved {len(moved)} file(s) to {destination}")
+            if moved and finder.journal_enabled:
+                _info(args, f"Undo with: filer undo \"{args.folder}\"" + (f" --journal-dir \"{args.journal_dir}\"" if args.journal_dir else "")
+                      + ("" if paths.is_inside(args.folder, destination, allow_root=True)
+                         else f" --allow-folder \"{destination}\""))
+            if finder.errors:
+                exit_code = 1
+                _info(args, f"{len(finder.errors)} file(s) could not be moved; the first: {finder.errors[0][0]}: {finder.errors[0][1]}")
+    elif args.move is not None:
+        _info(args, "Nothing to do.")
+    if args.json:
+        _emit_json(result)
+    return exit_code
 
 
 # ------------------------------------------------------------------ entry point
