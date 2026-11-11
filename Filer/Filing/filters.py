@@ -121,6 +121,45 @@ class FileFilter:
             return False
         return True
 
+    def matches(self, record):
+        """
+        True if a file record passes every filter. Works on any dict shaped like the ones in
+        FileStatsCollector.file_stats, without touching the disk.
+
+        Needs 'File Name'; the size and time filters also need 'File Size (Bytes)' and 'mtime_ns'
+        or 'Modification Date' (local time, to the second). A record missing something a filter
+        needs raises ValueError instead of silently passing or failing.
+        """
+        try:
+            name = record["File Name"]
+        except (KeyError, TypeError):
+            raise ValueError("record needs a 'File Name'") from None
+        if not isinstance(name, str):
+            raise ValueError("record has an invalid 'File Name'")
+        if not self.name_ok(name):
+            return False
+        if not self._has_stat_filter:
+            return True
+        size = record.get("File Size (Bytes)")
+        if self.min_size is not None or self.max_size is not None:
+            if isinstance(size, bool) or size is None:
+                raise ValueError(f"record for {name!r} needs 'File Size (Bytes)' for the size filters")
+            try:
+                size = int(str(size).strip())
+            except ValueError:
+                raise ValueError(f"record for {name!r} has an invalid size: {size!r}") from None
+        mtime = None
+        if self.modified_after is not None or self.modified_before is not None:
+            mtime_ns = record.get("mtime_ns")
+            if isinstance(mtime_ns, int) and not isinstance(mtime_ns, bool):
+                mtime = mtime_ns / 1e9
+            elif record.get("Modification Date") is not None:
+                mtime = parse_time(record["Modification Date"])
+            else:
+                raise ValueError(f"record for {name!r} needs 'mtime_ns' or 'Modification Date' for the time filters")
+        # a value that no active filter looks at may be missing; stat_ok ignores it
+        return self.stat_ok(0 if size is None else size, 0.0 if mtime is None else mtime)
+
     def __repr__(self):
         return (f"FileFilter(min_size={self.min_size}, max_size={self.max_size}, "
                 f"modified_after={self.modified_after}, modified_before={self.modified_before}, "
