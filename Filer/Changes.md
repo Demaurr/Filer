@@ -27,7 +27,7 @@ All the Noteable changes will be stated here.
 - `link_duplicates()` could skip files that were written just before the search, because the system clock can lag a few milliseconds behind file timestamps (seen on Windows). A 0.1 s tolerance now covers it; files really changed after the search are still refused.
 - A hostile `*` pattern such as `a*a*a*a*a*b` no longer makes name matching take minutes (the ignore rules use a linear-time form of `*`).
 
-## Version 1.6.0 - Unreleased
+## Version 1.6.0 - 2026-11-09
 
 ### Added
 - **Command-line interface:** `filer` command (also `python -m Filing`) with `stats`, `move`, `undo` and `dupes`. Supports `--dry-run`, `--organize-by`, filters, `--json` output, `--quiet` / `--no-progress`, and asks for confirmation before changing files (`--yes` to skip; without a terminal it refuses instead of guessing). Exit codes: 0 ok, 1 error or partly done, 2 bad usage, 130 interrupted.
@@ -43,7 +43,7 @@ All the Noteable changes will be stated here.
 ### Changed
 - Removed the deprecated license classifier (the `license="MIT"` field stays).
 
-## Version 1.5.0 - Unreleased
+## Version 1.5.0 - 2026-11-09
 
 ### Added
 - **Hash cache** for `DuplicateFinder` (`Filing.HashCache`): hashes are remembered in `<root>/.filer_journal/hash_cache.json` (or `cache_dir`), so a repeat run does not read unchanged files again. A cached hash is used only while the file's size and modification time (nanoseconds) are exactly as before; files modified within the last two seconds are never cached; deleted files are pruned. A missing, corrupt or outdated cache is ignored. Turn it off with `use_cache=False`, wipe it with `clear_cache()`.
@@ -52,7 +52,7 @@ All the Noteable changes will be stated here.
 ### Changed
 - `list_journals()` / `undo_last_move()` now only consider real journal files, so other JSON files in `.filer_journal` (such as the hash cache) are never mistaken for a journal.
 
-## Version 1.4.0 - Unreleased
+## Version 1.4.0 - 2026-11-09
 
 ### Added
 - **Dry run:** `gather_media(dry_run=True)`, `gather_files(dry_run=True)`, `preview_moves()` and `move_files_to_destination(..., dry_run=True)` return the planned moves `{source: destination}` and touch nothing. Name conflicts, also between planned files, are already resolved in the plan.
