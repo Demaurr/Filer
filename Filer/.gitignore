@@ -6,3 +6,4 @@ testing.py
 Filer.egg-info/*
 dist/*
 build/*
+ROADMAP.md

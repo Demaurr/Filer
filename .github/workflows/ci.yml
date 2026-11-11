@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        shell: bash
+        working-directory: Filer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run the tests
+        # tests_filestatser.py is the original test file: it reads and rewrites files in the repository
+        # (and uses Windows-style paths), so it is left out. All other tests use temporary folders only.
+        working-directory: Filer/tests
+        env:
+          PYTHONPATH: ..
+        run: |
+          modules=$(ls tests_*.py | grep -v '^tests_filestatser\.py$' | sed 's/\.py$//' | tr '\n' ' ')
+          python -m unittest $modules
+      - name: Check the working tree is unchanged (tests must not write into the repository)
+        working-directory: .
+        run: git status --porcelain --untracked-files=no | tee /dev/stderr | (! grep .)
+
+  package:
+    name: Build and install the package
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Filer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Install the wheel and run the command
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl
+          /tmp/venv/bin/filer --version
+          /tmp/venv/bin/python -m Filing --help
+      - name: Speed benchmark (informational)
+        run: python bench/run.py --sizes 5000 --repeat 1

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Filer"
+dynamic = ["version", "readme"]
+description = "Scan, report on, move, organise and de-duplicate files safely: every move can be previewed and undone, and nothing is ever deleted."
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = []
+authors = [{ name = "Demaurr", email = "demaurr@example.com" }]
+keywords = ["files", "duplicates", "organize", "cleanup", "undo"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Filesystems",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/demaurr/filer"
+
+[project.scripts]
+filer = "Filing.cli:main"
+
+[tool.setuptools]
+packages = ["Filing"]
+
+[tool.setuptools.dynamic]
+# one source of truth for the version: Filing/__init__.py
+version = { attr = "Filing.__version__" }
+readme = { file = ["documentation.md"], content-type = "text/markdown" }
