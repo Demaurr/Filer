@@ -136,9 +136,9 @@ class TestFinding(Base):
     def test_unreadable_files_are_reported_not_fatal(self):
         f = self.finder()
         victim = os.path.join(self.root, "b", "copy_of_doc.txt")
-        original_stats = list(f._file_stats)
+        original_stats = list(f.files)
         os.remove(victim)  # vanished between scan and hash
-        f._file_stats = original_stats
+        f = self.finder(file_stats=original_stats)
         groups = f.find()
         self.assertEqual(len(f.errors), 1)
         self.assertEqual(f.errors[0][0], victim)
@@ -248,6 +248,27 @@ class TestMovingDuplicates(Base):
 
 
 class TestLinkingDuplicates(Base):
+
+    def test_files_written_just_before_the_search_can_be_linked(self):
+        """A coarse system clock may report a time slightly BEFORE the newest file timestamp."""
+        f = self.finder()
+        f.find()
+        stamp = f._found_at + 0.012  # the files look 12 ms younger than the clock reading taken after the search
+        for path in ("a/doc.txt", "b/copy_of_doc.txt", "c/deeper/doc.txt", "a/other.bin", "b/other_copy.bin"):
+            os.utime(os.path.join(self.root, *path.split("/")), (stamp, stamp))
+        planned = f.link_duplicates(dry_run=True)
+        self.assertEqual(len(planned), 3)
+        self.assertEqual(f.errors, [])
+
+    def test_files_changed_after_the_search_are_still_refused(self):
+        f = self.finder()
+        f.find()
+        target = os.path.join(self.root, "a", "doc.txt")
+        later = f._found_at + 5
+        os.utime(target, (later, later))
+        planned = f.link_duplicates(dry_run=True)
+        self.assertNotIn(target, planned)
+        self.assertTrue(any(p == target and "changed since the search" in m for p, m in f.errors))
 
     def test_dry_run_changes_nothing(self):
         f = self.finder()

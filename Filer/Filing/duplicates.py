@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from Filing.cache import HashCache
+from Filing.cache import HashCache, HashStore
 from Filing.filestatser import FileStatsCollector
 from Filing.filters import parse_size
 from Filing.journal import MoveJournal, JOURNAL_DIR_NAME, undo_moves
@@ -37,6 +37,7 @@ from Filing.progress import make_reporter, STAGE_HASH_PARTIAL, STAGE_HASH_FULL, 
 PARTIAL_CHUNK = 64 * 1024
 FULL_BUFFER = 1024 * 1024
 KEEP_CHOICES = ("oldest", "newest", "first", "shortest_path")
+CLOCK_SLACK = 0.1  # seconds; see DuplicateFinder._unchanged
 
 
 @dataclass
@@ -54,7 +55,7 @@ class DuplicateGroup:
 
 def _partial_hash(path, size):
     digest = hashlib.blake2b(digest_size=16)
-    with open(path, "rb") as f:
+    with open(path, "rb", buffering=0) as f:  # unbuffered: we read big blocks ourselves
         digest.update(f.read(PARTIAL_CHUNK))
         if size > PARTIAL_CHUNK:
             f.seek(max(PARTIAL_CHUNK, size - PARTIAL_CHUNK))
@@ -90,6 +91,11 @@ class DuplicateFinder:
             again. A file's cached hash is used only while its size and modification time are unchanged.
             Stored in '<journal_dir or root/.filer_journal>/hash_cache.json'.
         cache_dir (str): Folder for the cache file (default: the journal folder).
+        cache (HashStore): Your own hash store instead of the built-in file cache (see Filing.cache.HashStore).
+            When given, use_cache and cache_dir are ignored, the finder calls its prune() and save() at the
+            end of find(), and it never clears it unless you call clear_cache(force=True). A store that
+            raises an error is treated as empty for that file; the problem is listed in self.errors.
+            Digests from a store are trusted for finding; linking still compares files byte for byte.
         progress: function(stage, done, total) called while scanning, hashing, moving and linking (see Filing.progress).
         verbose (bool): Set False to silence informational messages (reports such as print_summary still print).
         filter_options: max_size, modified_after, modified_before, name_glob, name_regex (see FileStatsCollector).
@@ -97,7 +103,7 @@ class DuplicateFinder:
 
     def __init__(self, root_folder, destination_folder=None, skip_folders=None, min_size=1,
                  file_stats=None, journal=True, journal_dir=None, max_workers=None,
-                 use_cache=True, cache_dir=None, progress=None, verbose=True, **filter_options):
+                 use_cache=True, cache_dir=None, progress=None, verbose=True, cache=None, **filter_options):
         self.verbose = verbose
         self._progress = make_reporter(progress)
         self.root_folder = root_folder
@@ -111,9 +117,18 @@ class DuplicateFinder:
         self.moved_files = {}
         self._found_at = None
         self._journal = None
-        self._cache_path = HashCache.default_path(root_folder, cache_dir or journal_dir)
-        self._cache = HashCache(self._cache_path) if use_cache else None
+        if cache is not None and not isinstance(cache, HashStore):
+            raise TypeError("cache must provide lookup(), store(), prune(), save() and clear() (see HashStore)")
+        self._own_cache = cache is None
+        if cache is not None:
+            self._cache_path = getattr(cache, "path", None)
+            self._cache = cache
+        else:
+            self._cache_path = HashCache.default_path(root_folder, cache_dir or journal_dir)
+            self._cache = HashCache(self._cache_path) if use_cache else None
         self.cache_hits = 0
+        self._cache_misses = 0
+        self._count_lock = threading.Lock()
 
         if file_stats is None:
             skips = list(skip_folders) if skip_folders else []
@@ -136,8 +151,7 @@ class DuplicateFinder:
         Files that cannot be read are skipped and listed in self.errors.
         """
         self.errors = []
-        if self._cache is not None:
-            self._cache.hits = self._cache.misses = 0
+        self.cache_hits = self._cache_misses = 0
         started = time.perf_counter()
         by_size = defaultdict(list)
         for stat in self._file_stats:
@@ -176,26 +190,63 @@ class DuplicateFinder:
         info = os.stat(path)  # raises OSError for vanished files, handled by the caller
         if info.st_size != size:
             return hash_function(path, size)  # changed since the scan: do not use the cache
-        cached = self._cache.lookup(path, size, info.st_mtime_ns, kind)
-        if cached:
+        cached = None
+        try:
+            cached = self._cache.lookup(path, size, info.st_mtime_ns, kind)
+        except Exception as e:  # a custom store must not be able to break the search
+            self.errors.append((path, f"hash cache lookup failed: {e}"))
+        if isinstance(cached, str) and cached:
+            with self._count_lock:
+                self.cache_hits += 1
             return cached
+        with self._count_lock:
+            self._cache_misses += 1
         digest = hash_function(path, size)
-        self._cache.store(path, size, info.st_mtime_ns, kind, digest)
+        try:
+            self._cache.store(path, size, info.st_mtime_ns, kind, digest)
+        except Exception as e:
+            self.errors.append((path, f"hash cache store failed: {e}"))
         return digest
 
     def _save_cache(self):
         if self._cache is None:
             return
-        self.cache_hits = self._cache.hits
         try:
             self._cache.prune(os.path.join(s["Source Folder"], s["File Name"]) for s in self._file_stats)
             self._cache.save()
-        except OSError as e:
-            self.errors.append((self._cache.path, f"could not save hash cache: {e}"))
+        except Exception as e:
+            self.errors.append((getattr(self._cache, "path", None) or "hash cache", f"could not save hash cache: {e}"))
 
-    def clear_cache(self):
-        """Forget all remembered hashes (and delete the cache file)."""
-        if self._cache is not None:
+    @property
+    def cache(self):
+        """The hash store in use (a HashStore), or None when caching is off."""
+        return self._cache
+
+    @property
+    def cache_stats(self):
+        """Cache use during the last find(): {'enabled', 'hits', 'misses', 'entries', 'path'}."""
+        try:
+            entries = len(self._cache) if self._cache is not None else 0
+        except TypeError:
+            entries = None  # a custom store may not know its size
+        return {"enabled": self._cache is not None, "hits": self.cache_hits, "misses": self._cache_misses,
+                "entries": entries, "path": self._cache_path}
+
+    @property
+    def files(self):
+        """The file records this finder works on (a read-only tuple)."""
+        return tuple(self._file_stats)
+
+    def clear_cache(self, force=False):
+        """
+        Forget all remembered hashes (and delete the cache file).
+        A store you passed in with cache=... is only cleared with force=True.
+        """
+        if not self._own_cache:
+            if not force:
+                raise ValueError("this cache was supplied by the caller; use clear_cache(force=True) to clear it")
+            self._cache.clear()
+        elif self._cache is not None:
             self._cache.clear()
         else:
             HashCache(self._cache_path).clear()  # caching is off for this run, but the file may still exist
@@ -330,6 +381,7 @@ class DuplicateFinder:
         destination_folder = destination_folder or self.destination_folder
         pairs = [(extra, os.path.join(destination_folder, os.path.basename(extra)))
                  for _, extra in self._extra_copies(keep)]
+        self._last_destination = destination_folder
         plan = plan_moves(pairs)
         if dry_run:
             self._say(f"\nDRY RUN: {len(plan)} duplicate(s) would be moved to {destination_folder} (nothing was changed)")
@@ -339,7 +391,8 @@ class DuplicateFinder:
             return {}
         self._journal = MoveJournal(self.root_folder, self.journal_dir, operation="duplicates") if self.journal_enabled else None
         moved, failed = execute_moves(plan, journal=self._journal, verbose=self.verbose,
-                                      progress=self._progress if self._progress.enabled else None)
+                                      progress=self._progress if self._progress.enabled else None,
+                                      allowed_roots=[self.root_folder, destination_folder])
         self.errors.extend(failed)
         self.moved_files.update(moved)
         self._say(f"Total Duplicates Moved: {len(moved)}")
@@ -401,11 +454,15 @@ class DuplicateFinder:
             info = os.stat(path)
         except OSError:
             return False
-        return info.st_size == size and info.st_mtime <= self._found_at
+        # time.time() can run a few milliseconds behind file timestamps (coarse system clocks), so a file written
+        # just before the search must not look as if it changed after it
+        return info.st_size == size and info.st_mtime <= self._found_at + CLOCK_SLACK
 
     def undo_last_move(self, journal=None, dry_run=False):
         """Undo the most recent move_duplicates() (see MediaGatherer.undo_last_move)."""
-        result = undo_moves(journal, root_folder=self.root_folder, journal_dir=self.journal_dir, dry_run=dry_run)
+        folders = [self.root_folder, self.destination_folder, getattr(self, '_last_destination', None)]
+        result = undo_moves(journal, root_folder=self.root_folder, journal_dir=self.journal_dir, dry_run=dry_run,
+                            allowed_roots=[f for f in folders if f])
         verb = "Would restore" if dry_run else "Restored"
         self._say(f"{verb} {len(result['restored'])} file(s) from {result['journal']}")
         for item in result["skipped"]:

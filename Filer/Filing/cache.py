@@ -15,12 +15,36 @@ import json
 import os
 import threading
 import time
+from typing import Iterable, Optional, Protocol, runtime_checkable
 
 from Filing.journal import JOURNAL_DIR_NAME
 
 CACHE_FILE_NAME = "hash_cache.json"
 CACHE_VERSION = 1
 RACY_WINDOW_NS = 2_000_000_000  # do not trust timestamps younger than this
+
+
+@runtime_checkable
+class HashStore(Protocol):
+    """
+    What DuplicateFinder needs from a hash cache. HashCache is the standard implementation; pass your
+    own object (a database, a shared cache, a logging wrapper...) with DuplicateFinder(cache=...).
+
+    Methods may be called from several threads at once (lookup and store), so they must be thread-safe.
+    kind is 'p' (hash of the first and last 64 KB) or 'f' (hash of the whole file). A store must only
+    return a digest for a file whose size and modification time (in nanoseconds) are exactly the ones
+    it was stored with, otherwise it must return None.
+    """
+
+    def lookup(self, path: str, size: int, mtime_ns: int, kind: str) -> Optional[str]: ...
+
+    def store(self, path: str, size: int, mtime_ns: int, kind: str, digest: str) -> None: ...
+
+    def prune(self, seen_paths: Iterable[str]) -> None: ...
+
+    def save(self) -> bool: ...
+
+    def clear(self) -> None: ...
 
 
 def _key(path):
