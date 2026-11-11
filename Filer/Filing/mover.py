@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 
+from Filing.paths import PathGuard, UnsafePathError
 from Filing.progress import STAGE_PLAN, STAGE_MOVE
 
 _NUMBER_SUFFIX = re.compile(r"^(.*?)\(\d+\)$")
@@ -66,22 +67,28 @@ def plan_moves(pairs, reserved=None, progress=None):
     return plan
 
 
-def execute_moves(plan, journal=None, verbose=True, progress=None):
+def execute_moves(plan, journal=None, verbose=True, progress=None, allowed_roots=None):
     """
     Perform a planned list of (source, destination) moves.
 
     A failing file is reported and skipped; the rest still move. If a journal is given, every
     move (and every folder created) is recorded and the journal is saved, even after errors.
     progress: optional function(stage, done, total), called after every file.
+    allowed_roots: optional list of folders. When given, a move whose source or destination is not inside
+        one of them is refused (reported in the failed list like any other failure, nothing is touched).
 
     Returns:
         tuple: (moved, failed) where moved is {source: final_destination} and
             failed is a list of (source, error message).
     """
     moved, failed = {}, []
+    guard = PathGuard(allowed_roots) if allowed_roots else None
     try:
         for number, (source, destination) in enumerate(plan, start=1):
             try:
+                if guard is not None:
+                    guard.check(source, resolve_name=False)
+                    guard.check(destination, resolve_name=False)
                 destination = unique_destination(destination)  # something may have appeared since planning
                 folder = os.path.dirname(destination)
                 if journal is not None:

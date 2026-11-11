@@ -164,7 +164,8 @@ class MediaGatherer(FileStatsCollector):
             move_progress = None
             if self._progress.enabled:
                 move_progress = self._progress.offset(self._move_offset, self._move_total or len(plan))
-            moved, failed = execute_moves(plan, journal=self._get_journal(), verbose=self.verbose, progress=move_progress)
+            moved, failed = execute_moves(plan, journal=self._get_journal(), verbose=self.verbose, progress=move_progress,
+                                          allowed_roots=[self.root_folder, destination_folder])
             # storing source path and destination path of the moved files in a dict {source_path: destination}
             self.moved_files.update(moved)
             self.failed_moves.extend(failed)
@@ -193,7 +194,8 @@ class MediaGatherer(FileStatsCollector):
         Returns:
             dict: {"journal": path, "restored": {moved_path: original_path}, "skipped": [...], "dry_run": bool}
         """
-        result = undo_moves(journal, root_folder=self.root_folder, journal_dir=self.journal_dir, dry_run=dry_run)
+        result = undo_moves(journal, root_folder=self.root_folder, journal_dir=self.journal_dir, dry_run=dry_run,
+                            allowed_roots=[self.root_folder, self.dest_folder])
         verb = "Would restore" if dry_run else "Restored"
         self._say(f"{verb} {len(result['restored'])} file(s) from {result['journal']}")
         for item in result["skipped"]:

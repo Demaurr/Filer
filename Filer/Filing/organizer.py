@@ -75,6 +75,23 @@ def _clean(part):
     return part if part else "_"
 
 
+def _safe_filename(name):
+    """
+    The file name as a single, harmless path component. Real file names are returned unchanged; a name
+    from outside data (a snapshot, a CSV) that holds a separator, a drive ('C:evil') or is '.'/'..' is
+    made safe, so joining it can never leave the destination folder.
+    """
+    name = str(name)
+    separators = os.sep + (os.altsep or "") + "\x00"
+    if any(ch in name for ch in separators):
+        name = "".join("_" if ch in separators else ch for ch in name)
+    if os.path.splitdrive(name)[0]:
+        name = name.replace(":", "_")
+    if name in (".", ".."):
+        name = "_"
+    return name
+
+
 class Organizer:
     """
     Decides where a file goes below the destination folder.
@@ -137,7 +154,7 @@ class Organizer:
         Relative destination path (folders plus file name) for a file stats dict.
         Every part is made safe for file systems, so the result can never leave the destination.
         """
-        filename = stat["File Name"]
+        filename = _safe_filename(stat["File Name"])
         if self._function is not None:
             parts = [_clean(p) for p in re.split(r"[\\/]+", str(self._function(stat))) if p]
             return os.path.join(*parts, filename) if parts else filename

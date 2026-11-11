@@ -10,7 +10,9 @@ import json
 import os
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from Filing.paths import PathGuard, UnsafePathError
 
 JOURNAL_DIR_NAME = ".filer_journal"
 JOURNAL_VERSION = 1
@@ -34,10 +36,15 @@ class MoveJournal:
         self.created = datetime.now()
         self.moves = []
         self.created_dirs = []
+        self.removed_dirs = []
         self.path = None
 
     def record_move(self, source, destination):
         self.moves.append({"source": os.path.abspath(source), "destination": os.path.abspath(destination)})
+
+    def record_removed_dir(self, folder):
+        """Remember an (empty) folder that was removed, so undo can create it again."""
+        self.removed_dirs.append(os.path.abspath(folder))
 
     def make_dirs(self, folder):
         """Create folder (and parents), remembering which ones did not exist so undo can remove them."""
@@ -57,11 +64,16 @@ class MoveJournal:
 
     def save(self):
         """Write the journal to disk (atomically). Returns its path, or None if nothing was recorded."""
-        if not self.moves and not self.created_dirs:
+        if not self.moves and not self.created_dirs and not self.removed_dirs:
             return None
         os.makedirs(self.journal_dir, exist_ok=True)
         if self.path is None:
-            self.path = os.path.join(self.journal_dir, f"{self.operation}_{self.created:%Y%m%d_%H%M%S_%f}.json")
+            # Two runs can start within one clock tick: never reuse a name, or the older journal would be overwritten
+            stamp = self.created
+            self.path = os.path.join(self.journal_dir, f"{self.operation}_{stamp:%Y%m%d_%H%M%S_%f}.json")
+            while os.path.exists(self.path):
+                stamp += timedelta(microseconds=1)
+                self.path = os.path.join(self.journal_dir, f"{self.operation}_{stamp:%Y%m%d_%H%M%S_%f}.json")
         _write_json_atomic(self.path, {
             "version": JOURNAL_VERSION,
             "operation": self.operation,
@@ -70,6 +82,7 @@ class MoveJournal:
             "undone": False,
             "moves": self.moves,
             "created_dirs": self.created_dirs,
+            "removed_dirs": self.removed_dirs,
         })
         return self.path
 
@@ -99,7 +112,7 @@ def find_latest_journal(journal_dir, include_undone=False):
     return None
 
 
-def undo_moves(journal=None, root_folder=None, journal_dir=None, dry_run=False):
+def undo_moves(journal=None, root_folder=None, journal_dir=None, dry_run=False, allowed_roots=None):
     """
     Move the files of a journal back to where they came from.
 
@@ -107,13 +120,20 @@ def undo_moves(journal=None, root_folder=None, journal_dir=None, dry_run=False):
         journal (str): Path of a journal JSON file. If None, the newest journal that has not
             been undone is used (looked up in journal_dir, or '<root_folder>/.filer_journal').
         dry_run (bool): Only report what would be restored.
+        allowed_roots (list): The only folders undo may touch. A journal is just a file, and one that was
+            edited (or came with a downloaded folder) must not be able to move files from or to other
+            places, so every path in it is checked and entries outside these folders are skipped and
+            reported. Default: root_folder if given, otherwise the root recorded in the journal itself
+            (weaker: pass allowed_roots or root_folder when the journal is not fully trusted).
+            If the files were moved to a destination outside the scanned folder, include it here.
 
     Files are never overwritten: if the original location is occupied again, or the moved file
     is gone, that entry is skipped and reported. Skipped entries stay in the journal, so
     undo can be run again after you resolve them. Folders created by the run are removed if empty.
 
     Returns:
-        dict: {"journal": path, "restored": {moved_path: original_path}, "skipped": [...], "dry_run": bool}
+        dict: {"journal": path, "restored": {moved_path: original_path}, "skipped": [...], "dry_run": bool,
+            "recreated": [folders removed by `filer empty` that were created again]}
     """
     if journal is None:
         if journal_dir is None:
@@ -124,12 +144,31 @@ def undo_moves(journal=None, root_folder=None, journal_dir=None, dry_run=False):
         if journal is None:
             raise FileNotFoundError(f"No journal to undo in '{journal_dir}'")
     data = load_journal(journal)
+    if not isinstance(data, dict) or not isinstance(data.get("moves", []), list):
+        raise ValueError(f"'{journal}' is not a Filer journal")
+
+    if allowed_roots is None:
+        anchor = root_folder if root_folder is not None else data.get("root")
+        if not isinstance(anchor, str) or not anchor:
+            raise UnsafePathError("the journal does not say which folder it belongs to; pass root_folder or allowed_roots")
+        allowed_roots = [anchor]
+    guard = PathGuard(allowed_roots)
 
     restored, skipped = {}, []
     for entry in reversed(data.get("moves", [])):
+        if not isinstance(entry, dict):
+            skipped.append({"source": None, "destination": None, "reason": "unreadable journal entry"})
+            continue
         if entry.get("restored"):
             continue
-        source, destination = entry["source"], entry["destination"]
+        source, destination = entry.get("source"), entry.get("destination")
+        try:
+            # a move acts on a link itself, so only the folder part of each path is followed
+            guard.check(source, resolve_name=False)
+            guard.check(destination, resolve_name=False)
+        except UnsafePathError as e:
+            skipped.append({"source": source, "destination": destination, "reason": f"unsafe path: {e}"})
+            continue
         if not os.path.exists(destination):
             skipped.append({"source": source, "destination": destination, "reason": "moved file no longer exists"})
         elif os.path.exists(source):
@@ -145,16 +184,32 @@ def undo_moves(journal=None, root_folder=None, journal_dir=None, dry_run=False):
                 entry["restored"] = True
             restored[destination] = source
 
+    # folders removed by an "empty folders" run are created again (parents first)
+    recreated, pending = [], []
+    removed_dirs = data.get("removed_dirs", [])
+    for folder in reversed(removed_dirs if isinstance(removed_dirs, list) else []):
+        try:
+            guard.check(folder, resolve_name=False)
+            if not dry_run:
+                os.makedirs(folder, exist_ok=True)
+            recreated.append(folder)
+        except (OSError, UnsafePathError) as e:
+            skipped.append({"source": folder, "destination": None, "reason": f"folder not recreated: {e}"})
+            pending.append(folder)
+
     if not dry_run:
-        everything_restored = all(entry.get("restored") for entry in data.get("moves", []))
+        data["removed_dirs"] = list(reversed(pending))
+        everything_restored = not pending and all(isinstance(entry, dict) and entry.get("restored") for entry in data.get("moves", []))
         if everything_restored:
-            for folder in reversed(data.get("created_dirs", [])):
+            created_dirs = data.get("created_dirs", [])
+            for folder in reversed(created_dirs if isinstance(created_dirs, list) else []):
                 try:
+                    guard.check(folder, resolve_name=False)
                     os.rmdir(folder)  # only succeeds if empty
-                except OSError:
+                except (OSError, UnsafePathError):
                     pass
             data["undone"] = True
             data["undone_at"] = datetime.now().isoformat(timespec="seconds")
         _write_json_atomic(journal, data)
 
-    return {"journal": journal, "restored": restored, "skipped": skipped, "dry_run": dry_run}
+    return {"journal": journal, "restored": restored, "skipped": skipped, "dry_run": dry_run, "recreated": recreated}
