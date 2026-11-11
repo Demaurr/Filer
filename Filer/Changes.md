@@ -1,7 +1,7 @@
 # Changes
 All the Noteable changes will be stated here.
 
-## Version 1.4.0 - Unreleased
+## Version 1.4.0 - 2026-11-09
 
 ### Added
 - **Dry run:** `gather_media(dry_run=True)`, `gather_files(dry_run=True)`, `preview_moves()` and `move_files_to_destination(..., dry_run=True)` return the planned moves `{source: destination}` and touch nothing. Name conflicts, also between planned files, are already resolved in the plan.
