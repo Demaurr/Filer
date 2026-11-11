@@ -2,7 +2,7 @@
 
 Filer scans folders, reports on the files in them, and moves, organises and de-duplicates files **safely**: every move can be previewed first and undone afterwards, and nothing is ever deleted. It works as a Python library (`import Filing`) and as a command (`filer`). It needs Python 3.9 or newer and has no third-party dependencies.
 
-This document describes version 1.6.0.
+This document describes version 1.7.0.
 
 ## Contents
 
@@ -19,7 +19,7 @@ This document describes version 1.6.0.
 
 ## 1. Install
 
-Filer is not on PyPI yet. Install it from the project folder that contains `setup.py`:
+Filer is not on PyPI yet. Install it from the project folder that contains `pyproject.toml`:
 
 ```
 git clone https://github.com/demaurr/filer.git
@@ -37,7 +37,7 @@ pip install --upgrade .
 | Check what is installed | `pip show Filer` |
 | Remove | `pip uninstall Filer` |
 
-The package is installed under the name **Filer** but imported as **`Filing`**. Installing also adds the **`filer`** command. If an old copy keeps being used, delete the `build/` folder next to `setup.py` and install again.
+The package is installed under the name **Filer** but imported as **`Filing`**. Installing also adds the **`filer`** command. If an old copy keeps being used, delete the `build/` folder next to `pyproject.toml` and install again.
 
 ---
 
@@ -120,6 +120,30 @@ Times can be a `datetime`, a `date`, a timestamp, or text such as `2026-11-09` o
 - Name clashes in the destination are resolved by renaming the incoming file: `song.mp3`, `song(1).mp3`, `song(2).mp3`, ... Existing files are never replaced.
 - A move continues after a single file fails; failures are listed afterwards and the journal still records everything that did move.
 
+### Ignore rules (`.filerignore`, `--exclude`)
+
+Besides `skip_folders`, you can keep files and folders out of a scan with `.gitignore`-style rules. Put them in a file called `.filerignore` in the folder you scan, pass them in code (`exclude=["*.tmp", "build/"]`, `ignore_file=path_or_False`), or on the command line (`--exclude`, `--ignore-file`, `--no-ignore-file`). Folders that match are never entered, so big ignored trees cost nothing.
+
+```
+# .filerignore
+*.tmp              # any file called *.tmp, at any depth
+build/             # folders only
+/cache             # only the top-level 'cache'
+docs/**/draft*     # ** matches any number of folders
+!keep.tmp          # re-include (the last matching rule wins)
+```
+
+| Rule | Meaning |
+|---|---|
+| `name`, `*.log`, `data?.csv`, `[abc]` | Matches a file or folder name at any depth. `*` never crosses a `/`. |
+| `dir/` | Folders only. |
+| `/top`, or a `/` inside the rule (`docs/*.md`) | Anchored to the scanned folder. |
+| `**/x`, `a/**/b`, `logs/**` | Any number of folders. |
+| `!rule` | Re-includes what an earlier rule ignored (not possible inside an ignored folder, as in git). |
+| `# text`, blank lines | Ignored. `\#` and `\!` give a literal `#` or `!`. |
+
+Matching ignores case on Windows. Only the `.filerignore` in the scanned folder is read (not ones in sub-folders). The same rules work for `stats`, `move`, `dupes`, `empty` and `junk`. In code: `Filing.IgnoreRules(["*.log"]).is_ignored("a/b.log")`.
+
 ### What Filer never does
 
 - It **never deletes** files.
@@ -179,6 +203,8 @@ Progress is shown on stderr (one updating line in a terminal, one line per finis
 | `--min-size SIZE`, `--max-size SIZE` | Size limits, e.g. `10MB`. |
 | `--modified-after DATE`, `--modified-before DATE` | Time limits, e.g. `2026-01-31`. |
 | `--glob PATTERN`, `--regex PATTERN` | File name patterns. |
+| `--exclude PATTERN` | Leave out files/folders matching a `.gitignore`-style rule (see Ignore rules). Repeatable. |
+| `--ignore-file FILE`, `--no-ignore-file` | Read rules from FILE instead of `FOLDER/.filerignore`, or ignore that file. |
 
 ### `filer stats FOLDER` — statistics and reports
 
@@ -234,6 +260,8 @@ Moves the files of the newest journal that has not been undone back where they c
 
 Files that cannot be restored (original spot occupied, or the file is gone) are listed and the command exits with code 1; run it again after fixing the problem.
 
+**Safety of undo.** A journal is just a file, so `filer undo` only touches files inside FOLDER. If you moved files to a destination outside FOLDER (`--destination`, `--move DIR`), allow that folder when undoing: `filer undo FOLDER --allow-folder DIR` (the move command prints this for you). In code: `undo_moves(..., allowed_roots=[root, destination])`. Files outside the allowed folders are skipped and reported, and stay in the journal.
+
 ### `filer dupes FOLDER` — find duplicate files
 
 Finds files with identical content and prints a summary: number of groups, extra copies and reclaimable space.
@@ -250,6 +278,47 @@ Finds files with identical content and prints a summary: number of groups, extra
 | `--dry-run` | With `--move` or `--link`: show what would happen; change nothing. |
 | `-y`, `--yes` | Do not ask for confirmation. |
 | `--no-cache`, `--clear-cache` | Do not remember hashes / forget remembered hashes first. |
+
+### `filer empty FOLDER` — find and remove empty folders
+
+Lists folders that hold no files. A folder whose only content is empty folders is empty too. Nothing changes unless you add `--remove`, and no file can ever be deleted: folders are removed with `rmdir`, which refuses anything that is not empty. A folder is never listed if it holds a file, a link, or a folder you skipped or ignored.
+
+| Option | Meaning |
+|---|---|
+| `--remove` | Remove the empty folders (deepest first). Asks first; recorded so `filer undo` creates them again. |
+| `--dry-run` | With `--remove`: show what would be removed. |
+| `-y`, `--yes` | Do not ask. |
+| `--skip`, `--exclude`, `--ignore-file`, `--no-ignore-file` | Leave folders out (they count as content). |
+| `--no-journal`, `--journal-dir DIR` | Do not record the removal, or keep the journal elsewhere. |
+
+```
+filer empty D:\Photos                       # list
+filer empty D:\Photos --remove --dry-run    # preview
+filer empty D:\Photos --remove              # asks, then removes
+filer undo D:\Photos                        # puts the folders back
+```
+
+### `filer junk FOLDER` — find junk and zero-byte files
+
+Reports junk files by name (`Thumbs.db`, `desktop.ini`, `.DS_Store`, `._*`, `~$*`, `.~lock.*#`, `*.tmp`, `*.temp`, `*~`; matched without regard to case) and zero-byte files. Zero-byte files that are normal, such as `__init__.py`, `.gitkeep` and `.gitignore`, are not reported. Nothing changes unless you add `--move`; nothing is ever deleted.
+
+| Option | Meaning |
+|---|---|
+| `--kinds junk zero_byte` | What to look for (default: both). |
+| `--pattern GLOB` | Also treat this name pattern as junk, e.g. `--pattern "*.bak"`. Repeatable. |
+| `--no-default-patterns` | Use only your `--pattern`s. |
+| `--top N` | How many files to list (default 20). |
+| `--csv [PATH]` | Write a CSV report of everything found. |
+| `--move [DIR]` | Move the files to DIR (default `FOLDER/Junk`), keeping their sub-folders. Asks first; undoable. |
+| `--dry-run`, `-y/--yes`, `--no-journal`, `--journal-dir` | As for `move`. |
+| `--skip`, `--exclude`, `--ignore-file`, `--no-ignore-file` | Leave folders and files out. |
+
+```
+filer junk D:\Photos
+filer junk D:\Photos --kinds junk --pattern "*.bak" --move --dry-run
+filer junk D:\Photos --move --yes
+filer undo D:\Photos
+```
 
 ### Exit codes
 
@@ -372,6 +441,73 @@ Finds identical files in stages, ruling files out as early as possible: same siz
 | `clear_cache()` | Forgets remembered hashes. |
 
 `keep` is `"oldest"`, `"newest"`, `"first"` (by path) or `"shortest_path"`. Other parameters: `file_stats=` (reuse the records of an existing collector), `use_cache`, `cache_dir`, `max_workers`, `journal`, `journal_dir`.
+
+### Public API (stable names)
+
+Everything below is exported from `Filing` (listed in `Filing.__all__`), takes plain data and works without a command line. Anything with a leading underscore may change at any time.
+
+**Comparing scans without reading files**
+
+```python
+from Filing import compare_snapshots, FileStatsCollector
+
+changes = compare_snapshots(old_records, new_records, only_diff=True, detect_moves=True)
+for change in changes:                 # Change(path, tag, old, new)
+    print(change.tag, change.path)     # Same | Modified | New | Deleted | Moved
+
+now = FileStatsCollector(r"D:\Photos", all_files=True)
+now.compare(earlier_collector_or_records)       # the other scan is the OLDER state
+now.compare_with_csv(r"D:\snapshot.csv")        # compare with a CSV report; writes nothing
+```
+
+Records are the dicts in `file_stats` (or rows of a Filer CSV). Sizes may be numbers or text, so CSV rows and live records compare correctly. `compare=("size", "mtime")` chooses what counts as a change; records with `mtime_ns` on both sides are compared exactly. With `detect_moves=True`, a deleted and a new file with the same name, size and modification time (or the same `Hash` and size, if records carry one) are reported as one `Moved` file. A path listed twice on one side raises `ValueError`. Nothing touches the disk.
+
+**Hash cache hook**
+
+```python
+class MyStore:                          # any object with these five methods is a Filing.HashStore
+    def lookup(self, path, size, mtime_ns, kind): ...   # digest or None; kind is "p" (partial) or "f" (full)
+    def store(self, path, size, mtime_ns, kind, digest): ...
+    def prune(self, seen_paths): ...
+    def save(self): ...
+    def clear(self): ...
+
+finder = DuplicateFinder(root, cache=MyStore())
+finder.cache          # the store in use (or None)
+finder.cache_stats    # {'enabled', 'hits', 'misses', 'entries', 'path'}
+finder.files          # tuple of the scanned records
+finder.clear_cache(force=True)   # a supplied store is only cleared with force=True
+```
+
+Stores are called from several threads, so they must be thread-safe, and must only return a digest for a file whose size and modification time are exactly those it was stored with. A store that raises an error is treated as empty for that file and the problem is listed in `finder.errors`. Linking duplicates compares files byte for byte, so even a wrong digest cannot cause a wrong link.
+
+**Helpers**
+
+| Name | Use |
+|---|---|
+| `parse_size("10MB")`, `parse_time("2026-11-09")`, `format_size(2048)` | The same input and output rules as the command line. |
+| `FileFilter(...).matches(record)` | Apply size, date and name filters to a record without scanning. |
+| `Organizer(rule).relative_path(record)` | Where a file would go, without a gatherer. Always stays inside the destination. |
+| `IgnoreRules(patterns).is_ignored(relative_path)` | Test ignore rules (see Ignore rules). |
+| `ensure_inside(roots, path)`, `is_inside(roots, path)`, `PathGuard(roots)` | Check that a path lies inside allowed folders. `..` and links cannot lead out; raises `UnsafePathError` (a `ValueError`). |
+
+**Cleaning up**
+
+```python
+from Filing import EmptyFolderFinder, JunkFinder
+
+empty = EmptyFolderFinder(r"D:\Photos", exclude=["build/"])
+empty.find()                       # list of empty folders
+empty.remove(dry_run=True)         # preview; remove() does it (journaled); undo_last_removal() reverses it
+
+junk = JunkFinder(r"D:\Photos", extra_patterns=["*.bak"], kinds=("junk", "zero_byte"))
+junk.find()                        # records with extra keys 'Kind' and 'Path'
+junk.junk, junk.zero_byte, junk.total_bytes, junk.to_dicts()
+junk.generate_csv("junk.csv")
+junk.move(dry_run=True)            # preview; move() does it (undoable); undo_last_move() reverses it
+```
+
+Both accept `skip_folders`, `exclude`, `ignore_file`, `journal`, `journal_dir`, `progress` and `verbose` like the other classes.
 
 ### Progress
 
@@ -512,7 +648,11 @@ Package layout (`Filing/`):
 | `filters.py` | `FileFilter` and size/time parsing |
 | `journal.py` | `MoveJournal`, `undo_moves` |
 | `mover.py` | planning and executing moves |
-| `cache.py` | `HashCache` |
+| `cache.py` | `HashCache`, the `HashStore` protocol |
+| `compare.py` | `compare_snapshots`, `Change` |
+| `ignore.py` | `IgnoreRules` (`.filerignore`) |
+| `paths.py` | `ensure_inside`, `PathGuard`, `UnsafePathError` |
+| `cleanup.py` | `EmptyFolderFinder`, `JunkFinder` |
 | `progress.py` | progress callback helpers |
 | `cli.py`, `__main__.py` | the `filer` command |
 
@@ -523,6 +663,8 @@ PYTHONPATH=Filer python -m unittest discover -s Filer/tests -p "tests_*.py"
 ```
 
 On PowerShell: `$env:PYTHONPATH = "Filer"` first. The original `tests_filestatser.py` uses relative paths, so run from the repository root; it rewrites `tests/have_files/file_stats.csv`.
+
+Speed measurements: `python Filer/bench/run.py --sizes 10000 100000 --repeat 3 --json result.json` builds reproducible test trees in a temporary folder, times scan, duplicate search (cold and warm), move preview and compare, and deletes the trees afterwards. `bench/make_tree.py` only fills folders that are empty or were made by itself.
 
 Contributions are welcome: open an issue or a pull request on the project's GitHub page. Changes between versions are listed in `Changes.md`.
 

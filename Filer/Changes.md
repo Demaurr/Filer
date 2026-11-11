@@ -1,6 +1,32 @@
 # Changes
 All the Noteable changes will be stated here.
 
+## Version 1.7.0 - 2026-11-11
+
+### Added
+- **Packaging and CI:** All package information now lives in `pyproject.toml` (Python 3.9 to 3.13, the `filer` command, long description from `documentation.md`); `setup.py` is only a small shim that calls `setup()`, so it can no longer disagree with it. The version is still read from `Filing/__init__.py` (single source). A GitHub Actions workflow (`.github/workflows/ci.yml`) runs the tests on Windows and Linux for Python 3.9, 3.10, 3.11, 3.12 and 3.13, builds the package, installs the wheel and runs `filer --version`. `dist/` is no longer committed (build with `python -m build`).
+- **Ignore rules:** `.gitignore`-style patterns keep files and folders out of a scan. Put them in `<folder>/.filerignore`, pass `exclude=[...]` / `ignore_file=...` to `FileStatsCollector`, `MediaGatherer`, `DuplicateFinder` and the new finders, or use `--exclude PATTERN`, `--ignore-file FILE` and `--no-ignore-file` on the command line. Ignored folders are never entered, so they also make scans faster. The rules are available as `Filing.IgnoreRules`.
+- **`filer empty`** / `EmptyFolderFinder`: lists empty folders (a folder that holds only empty folders counts). `--remove` / `remove()` removes them deepest first with `rmdir` (it can never delete a file), records them in a journal, and `filer undo` / `undo_last_removal()` creates them again.
+- **`filer junk`** / `JunkFinder`: reports junk files (`Thumbs.db`, `desktop.ini`, `.DS_Store`, `._*`, `~$*`, `*.tmp`, ...) and zero-byte files; expected empty files such as `__init__.py` and `.gitkeep` are not reported. `--move` / `move()` puts them in a `Junk` folder keeping their sub-folders, undoably. Patterns are configurable (`--pattern`, `--no-default-patterns`, `--kinds`).
+- **Public comparison API:** `Filing.compare_snapshots(old, new, only_diff=, compare=, detect_moves=)` compares two lists of file records without touching the disk and returns `Change` objects (`Same`, `Modified`, `New`, `Deleted`, `Moved`). `FileStatsCollector.compare(other)` and `compare_with_csv(path)` use it; the difference CSV is built on it.
+- **Cache hook:** `DuplicateFinder(cache=...)` accepts any object with the `HashStore` methods (`lookup`, `store`, `prune`, `save`, `clear`). New read-only `finder.cache`, `finder.cache_stats` and `finder.files`. A store that raises errors cannot break a search, and `clear_cache()` never clears a store you supplied unless you pass `force=True`.
+- **Helpers exported at the top level:** `parse_size`, `parse_time`, `format_size`; new `FileFilter.matches(record)` applies filters to records without scanning.
+- **Path safety:** `Filing.ensure_inside`, `is_inside`, `PathGuard` and `UnsafePathError` check that a path stays inside allowed folders (`..` and links cannot lead out; Windows device names and alternate data streams are refused).
+- `bench/make_tree.py` and `bench/run.py`: reproducible speed measurements in temporary folders. The 1.6.0 baseline for a 10,000-file tree is kept in `bench/results_1.6.0.json`; run `python bench/run.py --json FILE` on an idle machine to compare (timings on a busy machine vary several-fold).
+- `filer undo --allow-folder DIR` (see Changed).
+
+### Changed
+- **Undo only touches the folders it is allowed to.** A journal is an ordinary file, so a journal that was edited, or came with a downloaded folder, could have asked undo to move files from or to anywhere. `undo_moves()` now checks every path against `allowed_roots` (default: the folder you give, `root_folder`). If you moved files to a destination outside the scanned folder, undo from the same object still works; from a new session or the command line, allow the destination with `allowed_roots=[...]` / `filer undo --allow-folder DIR` (`filer move` prints the exact command). Entries outside the allowed folders are skipped and reported, and stay in the journal.
+- Moves made by `MediaGatherer`, `DuplicateFinder` and `JunkFinder` refuse any source or destination outside the scanned and destination folders.
+- **Faster scanning:** the folder tree is now listed once, and each folder is read while it is listed, in the main process. The scan no longer starts worker processes (the main cost on Windows). On a 10,000-file test tree, measured on an idle machine, a scan went from about 0.73 s to 0.15 s, a duplicate search from about 2.5 s to 1.3 s (cold) and from 1.5 s to 0.64 s (warm), and a move preview from 1.3 s to 0.65 s. Measured back to back on a busy machine the gains were smaller (scan about 0.70 s to 0.50 s, move preview 4.4 s to about 1 s), so expect roughly 1.4x to 5x depending on the load. A subclass that overrides `process_files` keeps the older two-pass path. The stray folder-count number printed after a scan is gone.
+- Hashing the first/last 64 KB of a file now opens the file unbuffered, which is slightly faster.
+- `Organizer.relative_path` makes a file name from outside data (a snapshot or CSV) safe: path separators, drive prefixes and `..` in a name can no longer lead out of the destination. Real file names are unchanged.
+
+### Fixed
+- **Journal overwrite:** two moves started within the same clock tick got the same journal file name, so the second silently replaced the first and its undo information was lost. Journal names are now always unique.
+- `link_duplicates()` could skip files that were written just before the search, because the system clock can lag a few milliseconds behind file timestamps (seen on Windows). A 0.1 s tolerance now covers it; files really changed after the search are still refused.
+- A hostile `*` pattern such as `a*a*a*a*a*b` no longer makes name matching take minutes (the ignore rules use a linear-time form of `*`).
+
 ## Version 1.6.0 - Unreleased
 
 ### Added
