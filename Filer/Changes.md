@@ -1,7 +1,7 @@
 # Changes
 All the Noteable changes will be stated here.
 
-## Version 1.5.0 - Unreleased
+## Version 1.5.0 - 2026-11-09
 
 ### Added
 - **Hash cache** for `DuplicateFinder` (`Filing.HashCache`): hashes are remembered in `<root>/.filer_journal/hash_cache.json` (or `cache_dir`), so a repeat run does not read unchanged files again. A cached hash is used only while the file's size and modification time (nanoseconds) are exactly as before; files modified within the last two seconds are never cached; deleted files are pruned. A missing, corrupt or outdated cache is ignored. Turn it off with `use_cache=False`, wipe it with `clear_cache()`.
@@ -10,7 +10,7 @@ All the Noteable changes will be stated here.
 ### Changed
 - `list_journals()` / `undo_last_move()` now only consider real journal files, so other JSON files in `.filer_journal` (such as the hash cache) are never mistaken for a journal.
 
-## Version 1.4.0 - Unreleased
+## Version 1.4.0 - 2026-11-09
 
 ### Added
 - **Dry run:** `gather_media(dry_run=True)`, `gather_files(dry_run=True)`, `preview_moves()` and `move_files_to_destination(..., dry_run=True)` return the planned moves `{source: destination}` and touch nothing. Name conflicts, also between planned files, are already resolved in the plan.
