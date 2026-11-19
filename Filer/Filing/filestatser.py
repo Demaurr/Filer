@@ -9,6 +9,11 @@ import csv
 from datetime import datetime
 from collections import Counter
 from multiprocessing import Pool
+import time
+from Filing.filters import FileFilter
+from Filing.compare import compare_snapshots
+from Filing.ignore import load_ignore_rules
+from Filing.progress import make_reporter, STAGE_SCAN, STAGE_READ
 
 class FileStatsCollector:
     """
@@ -18,7 +23,10 @@ class FileStatsCollector:
         root_folder (str): The root folder to scan for media files.
         media_extensions (list): List of allowed media file extensions.
         all_files (bool): Flag indicating whether to gather statistics for all files or only media files.
-        skip_folders (list): List of folders to skip while gathering statistics.
+        skip_folders (list): Folder names (or paths) to skip while gathering statistics.
+        min_size, max_size: Only keep files within these sizes (bytes or strings like '10MB').
+        modified_after, modified_before: Only keep files modified in this time range (inclusive/exclusive).
+        name_glob, name_regex: Only keep files whose name matches (a pattern or a list of patterns).
         total_files (int): Total number of files found in the root folder.
 
     Methods:
@@ -55,8 +63,45 @@ class FileStatsCollector:
     """
 
 
-    def __init__(self, root_folder, media_extensions: list = None, all_files=False, skip_folders: list=None):
-        # self.media_extensions = media_extensions
+    # Below this many folders, scanning serially is faster than starting a process pool
+    _PARALLEL_MIN_FOLDERS = 32
+
+    def __init__(
+            self,
+            root_folder,
+            media_extensions: list = None,
+            all_files=False,
+            skip_folders: list=None,
+            min_size=None,
+            max_size=None,
+            modified_after=None,
+            modified_before=None,
+            name_glob=None,
+            name_regex=None,
+            progress=None,
+            verbose=True,
+            exclude=None,
+            ignore_file=True
+        ):
+        # exclude: gitignore-style patterns (a list, or one string) for files and folders to leave out,
+        #     e.g. ['*.tmp', 'build/'] (see Filing.ignore). Folders that match are never entered.
+        # ignore_file: True (default) reads '<root_folder>/.filerignore' if it exists; a path reads that
+        #     file instead (an error if it cannot be read); False/None reads none.
+        # progress: function(stage, done, total) called while scanning (see Filing.progress).
+        # verbose: set False to silence the informational messages printed while scanning.
+        self.verbose = verbose
+        self._progress = make_reporter(progress)
+        # Filters (see Filing.filters.FileFilter) are applied during the scan, so files that do not
+        # match are never stored. Sizes accept bytes or strings like '10MB'; times accept
+        # datetime/date, a timestamp or an ISO string like '2026-11-09'.
+        self.file_filter = FileFilter(
+            min_size=min_size,
+            max_size=max_size,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            name_glob=name_glob,
+            name_regex=name_regex,
+        )
         if media_extensions is None:
             media_extensions = ['.mp3', '.mp4', '.avi', '.mkv', '.jpg', '.jpeg', '.png', '.gif']
         if skip_folders is None:
@@ -65,9 +110,17 @@ class FileStatsCollector:
         self.all_files = all_files
         self.skip_folders = skip_folders
         self.media_extensions = media_extensions
+        self.ignore_rules = load_ignore_rules(self.root_folder, exclude, ignore_file)
+        start = time.perf_counter()
         self.file_stats = self._gather_file_stats()
+        self._say(f"Gathered {len(self.file_stats)} file stats in {time.perf_counter() - start:.2f} seconds.")
         self.file_types = [stat["File Type"] for stat in self.file_stats]
         self.total_files = len(self.file_stats)
+
+    def _say(self, message):
+        """Print an informational message unless verbose is False."""
+        if getattr(self, 'verbose', True):
+            print(message)
 
     def get_styles(self):
         styles = f"""
@@ -153,8 +206,8 @@ h2 {{
         Returns:
             bool: True if the file has a valid media extension, False otherwise.
         """
-        return any(filename.lower().endswith(ext) for ext in self.media_extensions)
-    
+        return filename.lower().endswith(tuple(ext.lower() for ext in self.media_extensions))
+
     def check_root_folder(self, folder):
         """
         Check if the specified root folder exists; raise an error if it doesn't.
@@ -206,13 +259,13 @@ h2 {{
         Returns:
             str: The formatted file size with appropriate units (B, KB, MB, GB, TB).
         """
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
             if size < 1024.0:
                 break
             size /= 1024.0
         return "{:.2f} {}".format(size, unit)
 
-    def process_files(self, foldername, all_files, is_media_file, format_size):
+    def process_files(self, foldername, all_files, media_extensions, format_size, file_filter=None):
         """
         Process files within a folder and collect file statistics.
 
@@ -225,32 +278,182 @@ h2 {{
         Returns:
             list: A list of dictionaries containing file statistics.
         """
+        if file_filter is None:
+            file_filter = getattr(self, 'file_filter', None)
+        return self._scan_folder(foldername, all_files, media_extensions, format_size, file_filter)
+
+    @staticmethod
+    def _scan_folder(foldername, all_files, media_extensions, format_size, file_filter=None):
+        """Worker behind process_files. Static, so a process pool only has to send plain data."""
         folder_stats = []
-        counter = 0
+        extensions = tuple(ext.lower() for ext in media_extensions)
         try:
             with os.scandir(foldername) as entries:
-                print("Gathering data from:", foldername)
                 for entry in entries:
                     if entry.is_file():
                         filename = entry.name
-                        source_path = os.path.join(foldername, filename)
-                        if all_files or is_media_file(filename):
-                            counter += 1
+                        lowered = filename.lower()
+                        if all_files or lowered.endswith(extensions):
+                            if file_filter is not None and not file_filter.name_ok(filename):
+                                continue  # rejected by name: no stat call needed
+                            stat_info = entry.stat()
+                            if file_filter is not None and not file_filter.stat_ok(stat_info.st_size, stat_info.st_mtime):
+                                continue
                             folder_stats.append({
                                 'File Name': filename,
-                                'File Type': os.path.splitext(filename)[1].lower(),
-                                'File Size (Bytes)': entry.stat().st_size,
-                                'File Size (Human Readable)': format_size(entry.stat().st_size),
-                                'Creation Date': datetime.fromtimestamp(entry.stat().st_ctime).strftime('%Y-%m-%d %H:%M:%S'),
-                                'Modification Date': datetime.fromtimestamp(entry.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                                'File Type': os.path.splitext(lowered)[1],
+                                'File Size (Bytes)': stat_info.st_size,
+                                'File Size (Human Readable)': format_size(stat_info.st_size),
+                                'Creation Date': FileStatsCollector.format_timestamp(FileStatsCollector.get_creation_timestamp(stat_info)),
+                                'Modification Date': FileStatsCollector.format_timestamp(stat_info.st_mtime),
                                 'Source Folder': foldername
                             })
-                            
-                if counter:
-                    print(f"\t>Total Files From {foldername}: {counter}")
         except Exception as e:
             print(f"Error gathering file stats in folder '{foldername}': {e}")
         return folder_stats
+    
+    @staticmethod
+    def get_creation_timestamp(stat_info):
+        """
+        Return the creation time of a stat result as a timestamp.
+        Uses st_birthtime when the platform/Python provides it (Python 3.12+ on Windows,
+        macOS, BSD) and falls back to st_ctime (creation time on older Windows Pythons).
+        """
+        birth = getattr(stat_info, 'st_birthtime', None)
+        return stat_info.st_ctime if birth is None else birth
+
+    @staticmethod
+    def format_timestamp(timestamp):
+        """Format a timestamp as 'YYYY-MM-DD HH:MM:SS' (local time)."""
+        return datetime.fromtimestamp(timestamp).isoformat(sep=' ', timespec='seconds')
+
+    @staticmethod
+    def _split_skip_folders(skip_folders):
+        """Split skip entries into (set of folder names, set of absolute folder paths), normalised for comparison."""
+        names, paths = set(), set()
+        for skip in skip_folders or ():
+            skip = str(skip).strip()
+            if not skip:
+                continue
+            if os.sep in skip or (os.altsep and os.altsep in skip) or os.path.splitdrive(skip)[0]:
+                paths.add(os.path.normcase(os.path.abspath(skip)))
+            else:
+                names.add(os.path.normcase(skip))
+        return names, paths
+
+    @staticmethod
+    def walk_with_scandir(root, skip_folders=None, ignore=None):
+        """
+        Yield every folder under root (including root) without descending into skipped folders.
+
+        Each skip_folders entry is matched exactly, not as a substring:
+          - a plain name (e.g. '.git') skips every folder with exactly that name (the root
+            folder itself is never skipped by name);
+          - a path (contains a path separator or drive, e.g. the destination folder) skips
+            that folder and everything below it.
+        Matching ignores case on Windows. Empty entries are ignored.
+        ignore: optional IgnoreRules; folders they ignore (judged by their path below root) are not entered.
+        """
+        skip_names, skip_paths = FileStatsCollector._split_skip_folders(skip_folders)
+        stack = [root]
+        while stack:
+            folder = stack.pop()
+            if skip_names or skip_paths:
+                if folder != root and os.path.normcase(os.path.basename(folder)) in skip_names:
+                    continue
+                if skip_paths and os.path.normcase(os.path.abspath(folder)) in skip_paths:
+                    continue
+            yield folder
+            try:
+                with os.scandir(folder) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            if ignore is not None and ignore.dir_ignored(
+                                    os.path.relpath(entry.path, root).replace(os.sep, "/")):
+                                continue
+                            stack.append(entry.path)
+            except PermissionError:
+                pass
+
+    def _scan_tree(self):
+        """
+        Walk the tree once and build the file records while listing each folder (one directory listing
+        per folder; nothing is listed twice and no worker processes are started). Gives the same
+        records, in the same order, as listing all folders first and then reading each of them.
+        """
+        progress = self._progress
+        file_filter = self.file_filter if self.file_filter.active else None
+        all_files = self.all_files
+        extensions = tuple(ext.lower() for ext in self.media_extensions)
+        skip_names, skip_paths = self._split_skip_folders(self.skip_folders)
+        check_skips = bool(skip_names or skip_paths)
+        root = self.root_folder
+        format_size = self.format_size
+        format_timestamp = self.format_timestamp
+        birth = self.get_creation_timestamp
+        file_stats = []
+        append = file_stats.append
+        rules = self.ignore_rules
+        stack = [(root, "")]  # (folder, its path below root with / separators; only kept when there are rules)
+        folders = 0
+        self._say("Gathering folders....")
+        while stack:
+            folder, rel = stack.pop()
+            if check_skips:
+                if folder != root and os.path.normcase(os.path.basename(folder)) in skip_names:
+                    continue
+                if skip_paths and os.path.normcase(os.path.abspath(folder)) in skip_paths:
+                    continue
+            folders += 1
+            progress(STAGE_SCAN, folders, None)
+            try:
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            if rules is None:
+                                stack.append((entry.path, ""))
+                            else:
+                                child = rel + "/" + entry.name if rel else entry.name
+                                if not rules.dir_ignored(child):  # an ignored folder is never entered
+                                    stack.append((entry.path, child))
+                        elif entry.is_file():
+                            filename = entry.name
+                            lowered = filename.lower()
+                            if all_files or lowered.endswith(extensions):
+                                if file_filter is not None and not file_filter.name_ok(filename):
+                                    continue  # rejected by name: no stat call needed
+                                if rules is not None and rules.file_ignored(rel + "/" + filename if rel else filename):
+                                    continue
+                                info = entry.stat()
+                                size = info.st_size
+                                dot = lowered.rfind('.')  # same result as os.path.splitext(lowered)[1]
+                                extension = lowered[dot:] if dot > 0 and lowered[:dot].strip('.') else ''
+                                if file_filter is not None and not file_filter.stat_ok(size, info.st_mtime):
+                                    continue
+                                created = birth(info)
+                                modified = info.st_mtime
+                                modified_text = format_timestamp(modified)
+                                append({
+                                    'File Name': filename,
+                                    'File Type': extension,
+                                    'File Size (Bytes)': size,
+                                    'File Size (Human Readable)': format_size(size),
+                                    'Creation Date': modified_text if created == modified else format_timestamp(created),
+                                    'Modification Date': modified_text,
+                                    'Source Folder': folder
+                                })
+            except PermissionError:
+                pass  # a folder we may not list is skipped
+            except Exception as e:
+                print(f"Error gathering file stats in folder '{folder}': {e}")
+        progress(STAGE_SCAN, folders, folders)
+        progress(STAGE_READ, folders, folders)
+        self._say(f"Total folders found: {folders}")
+        return file_stats
+
+    def _process_task(self, task):
+        """process_files for one task; used by the process pool only when a subclass overrides process_files."""
+        return self.process_files(*task)
 
     def _gather_file_stats(self):
         """
@@ -263,16 +466,62 @@ h2 {{
         file_stats = []
 
         try:
-            with Pool() as pool:
-                folder_stats_lists = pool.starmap(self.process_files, 
-                                                  [(foldername, all_files, self.is_media_file, self.format_size) 
-                                                   for foldername, _, _ in os.walk(self.root_folder) 
-                                                   if all(skip_folder not in foldername for skip_folder in self.skip_folders)])
-                file_stats = [file_stat for folder_stats in folder_stats_lists for file_stat in folder_stats]
+            if type(self).process_files is FileStatsCollector.process_files:
+                return self._scan_tree()  # the normal case: one pass over the tree
+            self._say(f"Gathering folders....")
+            progress = self._progress
+            folder_list = []
+            for folder in self.walk_with_scandir(self.root_folder, self.skip_folders, self.ignore_rules):
+                folder_list.append(folder)
+                progress(STAGE_SCAN, len(folder_list), None)
+            progress(STAGE_SCAN, len(folder_list), len(folder_list))
+            self._say(f"Total folders found: {len(folder_list)}")
+            tasks = [(folder, all_files, self.media_extensions, self.format_size) for folder in folder_list]
+            total = len(tasks)
+            file_filter = self.file_filter if self.file_filter.active else None
+            folder_stats_lists = []
+            if total < self._PARALLEL_MIN_FOLDERS:
+                # Starting worker processes costs more than scanning a few folders
+                for task in tasks:
+                    folder_stats_lists.append(self.process_files(*task))
+                    progress(STAGE_READ, len(folder_stats_lists), total)
+            else:
+                chunksize = max(1, min(256, total // ((os.cpu_count() or 1) * 4)))
+                if type(self).process_files is FileStatsCollector.process_files:
+                    # Workers get plain data only (never the collector itself, which may hold callbacks)
+                    worker, worker_tasks = _scan_task, [task + (file_filter,) for task in tasks]
+                else:
+                    worker, worker_tasks = self._process_task, tasks  # a subclass changed process_files
+                with Pool() as pool:
+                    for folder_stats in pool.imap(worker, worker_tasks, chunksize=chunksize):
+                        folder_stats_lists.append(folder_stats)
+                        progress(STAGE_READ, len(folder_stats_lists), total)
+            file_stats = [file_stat for folder_stats in folder_stats_lists for file_stat in folder_stats]
+            if self.ignore_rules is not None:
+                rules, root = self.ignore_rules, self.root_folder
+                file_stats = [s for s in file_stats if not rules.file_ignored(
+                    os.path.relpath(os.path.join(s['Source Folder'], s['File Name']), root).replace(os.sep, "/"))]
+            self._say(len(folder_stats_lists))
         except Exception as e:
+            file_stats = []
             print(f"Unexpected error occurred: {e}")
+            return file_stats
 
         return file_stats
+    
+    def _create_empty_csv(self, csv_file_path):
+        """
+        Creates an empty CSV file with the standard fieldnames.
+        """
+        fieldnames = ['File Name', 'File Type', 'File Size (Bytes)', 'File Size (Human Readable)',
+                      'Creation Date', 'Modification Date', 'Source Folder']
+        try:
+            with open(csv_file_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+            print(f"\nEmpty File Stats CSV file generated: {csv_file_path}")
+        except Exception as e:
+            print(f"Error generating empty file stats CSV: {e}")
     
     @staticmethod
     def get_file_stats(file_path):
@@ -295,8 +544,8 @@ h2 {{
                 'File Type': os.path.splitext(filename)[1].lower(),
                 'File Size (Bytes)': file_stat.st_size,
                 'File Size (Human Readable)': FileStatsCollector.format_size(file_stat.st_size),
-                'Creation Date': datetime.fromtimestamp(file_stat.st_ctime).strftime('%Y-%m-%d %H:%M:%S'),
-                'Modification Date': datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                'Creation Date': FileStatsCollector.format_timestamp(FileStatsCollector.get_creation_timestamp(file_stat)),
+                'Modification Date': FileStatsCollector.format_timestamp(file_stat.st_mtime),
                 'Source Folder': foldername
             })
             # print(file_stats)
@@ -332,15 +581,20 @@ h2 {{
             print(f"An error occurred while sorting by key '{key}': {e}")
             return file_stats
 
-    def generate_file_stats_html(self, html_path=None):
+    def generate_file_stats_html(self, html_path=None, confirm=True):
         """
         Generate a pretty HTML report of file statistics.
+
+        Parameters:
+            html_path (str): Where to save the report (default: in the root folder).
+            confirm (bool): For more than 1500 files a question is asked first (memory use);
+                pass False to skip the question (e.g. in scripts).
         """
         if not self.file_stats:
             print("NO Data FOUND: Nothing To Create Html of")
             return -1
 
-        if len(self.file_stats) > 1500:
+        if confirm and len(self.file_stats) > 1500:
             user_input = input("Warning: Generating HTML report for a large number of files can consume a significant amount of memory. Do you want to continue? (yes/no): ").strip().lower()
             if user_input != 'yes':
                 print("HTML report generation aborted.")
@@ -405,19 +659,22 @@ h2 {{
     def generate_file_stats_csv(
             self, 
             csv_path=None,
-            sort_by="File Name"
+            sort_by="File Name",
+            allow_empty=False
         ):
         """
         Generate a CSV file containing detailed statistics of media files or all files.
         Parameters:
             csv_path (str): Optonal Path to save the stats csv in. Default will be the root folder with current datetime
             sort_by (str): Key to sort the values of the dict by default is "File Name"
+            allow_empty (bool): If True and no files were found, still create a CSV containing
+                only the header row (returns 0). If False, nothing is created (returns -1).
         """
-        if not self.file_stats:
+        if not self.file_stats and not allow_empty:
             print("NO Data FOUND: Nothing To Create Csv of")
             return -1
 
-        root_folder_basename = os.path.basename(self.root_folder)
+        root_folder_basename = os.path.basename(os.path.normpath(self.root_folder))
 
         if not root_folder_basename:  # Handle drive letters
             drive_letter = self.root_folder.split(":")[0]
@@ -426,6 +683,10 @@ h2 {{
         current_time= datetime.now().strftime('%Y%m%d_%H%M%S')
         csv_file_name = f'{root_folder_basename}_files_stats_{current_time}.csv'
         csv_file_path = os.path.join(self.root_folder, csv_file_name) if csv_path is None else csv_path
+
+        if not self.file_stats:
+            self._create_empty_csv(csv_file_path)
+            return 0
 
         try:
             with open(csv_file_path, 'w', newline='', encoding='utf-8') as csvfile:
@@ -477,7 +738,7 @@ h2 {{
             root_folder_basename = os.path.basename(self.root_folder)
             current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
             difference_csv_name = f'{root_folder_basename}_difference_{current_time}.csv'
-            difference_csv_path = os.path.join(self.root_folder, difference_csv_name) if output_path is None else csv_path
+            difference_csv_path = os.path.join(self.root_folder, difference_csv_name) if output_path is not None else csv_path
 
             with open(difference_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = ['File Name', 'File Type', 'File Size (Bytes)', 'File Size (Human Readable)',
@@ -494,53 +755,57 @@ h2 {{
 
     def _compare_file_stats(self, existing_files, only_diff=False):
         """
-        Compare the current file stats with existing file stats.
+        Compare the current file stats with existing file stats (rows of a CSV report).
+        Kept for the difference CSV; use compare() / compare_with_csv() for the public form.
 
         Parameters:
-        - existing_files (dict): A dictionary of files from the existing CSV with full paths as keys.
+        - existing_files (dict): files from the existing CSV with full paths as keys.
         - only_diff (bool): If True, return only the files that are 'Modified', 'New', or 'Deleted'.
 
         Returns:
         - list: A list of dictionaries containing file stats and a 'Tag' indicating the status.
         """
-        current_files = {
-            os.path.join(stat['Source Folder'], stat['File Name']): stat
-            for stat in self.file_stats
-        }
+        changes = compare_snapshots(existing_files, self.file_stats, only_diff=only_diff)
+        return [change.as_row() for change in changes]
 
-        difference_data = []
-        all_files = set(existing_files.keys()).union(current_files.keys())
+    def compare(self, other, only_diff=False, **options):
+        """
+        Compare this scan (the newer state) with an older one, without reading any file.
 
-        for full_path in all_files:
-            if full_path in existing_files and full_path in current_files:
-                if (existing_files[full_path]['File Size (Bytes)'] == str(current_files[full_path]['File Size (Bytes)']) and
-                        existing_files[full_path]['Modification Date'] == current_files[full_path]['Modification Date']):
-                    tag = 'Same'
-                else:
-                    tag = 'Modified'
-                data = {**current_files[full_path], 'Tag': tag}
-            elif full_path in existing_files:
-                data = {**existing_files[full_path], 'Tag': 'Deleted'}
-            else:
-                data = {**current_files[full_path], 'Tag': 'New'}
+        Parameters:
+            other: the older state: another FileStatsCollector, or a list of file records.
+            only_diff (bool): leave out files that are unchanged.
+            options: detect_moves=True, compare=("size", "mtime") (see compare_snapshots).
 
-            # Add to results based on only_diff flag
-            if not only_diff or data['Tag'] != 'Same':
-                difference_data.append(data)
+        Returns:
+            list of Change (tags: Same, Modified, New, Deleted, Moved), see Filing.compare.
+        """
+        older = other.file_stats if isinstance(other, FileStatsCollector) else other
+        return compare_snapshots(older, self.file_stats, only_diff=only_diff, **options)
 
-        return difference_data
-    
-    def get_existing_csvdata(self, csv_path):
+    def compare_with_csv(self, csv_path, only_diff=False, **options):
+        """
+        Compare this scan with a CSV report written earlier by generate_file_stats_csv.
+        Returns the changes instead of writing a file (see compare()).
+
+        Raises:
+            FileNotFoundError: the CSV does not exist.
+            ValueError: the CSV is not a Filer report (missing columns) or has invalid values.
+        """
+        return self.compare(self._read_csv_rows(csv_path), only_diff=only_diff, **options)
+
+    @staticmethod
+    def _read_csv_rows(csv_path):
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"File {csv_path} doesn't exists")
-        else:
-            existing_files = {}
-            with open(csv_path, 'r', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    full_path = os.path.join(row['Source Folder'], row['File Name'])
-                    existing_files[full_path] = row
-            return existing_files
+        with open(csv_path, 'r', encoding='utf-8', newline='') as csvfile:
+            return list(csv.DictReader(csvfile))
+
+    def get_existing_csvdata(self, csv_path):
+        existing_files = {}
+        for row in self._read_csv_rows(csv_path):
+            existing_files[os.path.join(row['Source Folder'], row['File Name'])] = row
+        return existing_files
 
 
     def show_file_size_distribution(self):
@@ -741,6 +1006,11 @@ Most Occurring File Type: {most_occurred}
             print(summary_stats)
         except Exception as e:
             print(f"Error printing summary stats: {e}")
+
+def _scan_task(task):
+    """Process-pool worker: scan one folder. task = (folder, all_files, extensions, format_size, file_filter)."""
+    return FileStatsCollector._scan_folder(*task)
+
 
 if __name__ == "__main__":
     filer = FileStatsCollector(r"Filer\tests\have_files", media_extensions=[".csv", ".txt", ".py", ".html", ".json", ".xml", ".log", ".md", ".yaml", ".yml", ".ini", ".config", ".conf", ".cfg", ".bat", ".sh", ".ps1", ".psm1", ".psd1", ".ps1xml", ".pssc", ".pssc", ".psh", ".psh", ".psc1", ".psc2", ".pfx", ".cer", ".crt", ".key", ".pem", ".pub", ".der", ".csr", ".p12", ".p7b", ".p7c", ".p7r", ".p7s", ".jks", ".keystore", ".bks", ".bks", ".jceks", ".p8", ".p8", ".asc", ".gpg", ".pgp", ".sig", ".md5", ".sha1", ".sha256", ".sha512", ".sha3"])
