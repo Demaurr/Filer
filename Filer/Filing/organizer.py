@@ -144,7 +144,7 @@ class Organizer:
             "month": date_text[5:7],
             "day": date_text[8:10],
             "size": size_bucket(stat.get("File Size (Bytes)", 0)),
-            "source": os.path.basename(os.path.normpath(stat.get("Source Folder", ""))),
+            "source": re.split(r"[\\/]", str(stat.get("Source Folder", "")).rstrip("\\/"))[-1],
             "name": name,
             "filename": filename,
         }

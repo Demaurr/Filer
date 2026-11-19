@@ -56,7 +56,10 @@ def can_make_symlinks(tmp):
     os.makedirs(target, exist_ok=True)
     ok = make_dir_link(link, target)
     if ok:
-        os.rmdir(link)
+        try:
+            os.unlink(link)  # a symlink on POSIX
+        except OSError:
+            os.rmdir(link)  # a junction on Windows
     return ok
 
 
